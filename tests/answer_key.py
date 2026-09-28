@@ -77,3 +77,18 @@ def compare(issues, expected: list[dict]) -> Comparison:
             continue
         cmp.false_positive.append(i)
     return cmp
+
+
+def run_merge_main(argv: list[str]) -> tuple[int, str]:
+    """scripts/run_merge.py 의 main()을 실행하고 (종료 코드, 표준 출력)을 돌려준다."""
+    import contextlib
+    import importlib.util
+    import io
+
+    spec = importlib.util.spec_from_file_location("run_merge", ROOT / "scripts" / "run_merge.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = module.main(argv)
+    return code, buf.getvalue()
