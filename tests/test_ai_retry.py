@@ -224,6 +224,24 @@ def test_app_503_then_success_fills_ai_recommendations(monkeypatch, sleeps):
     assert "남은 AI 호출: 4/5회" in texts(at.caption)      # 성공한 시도는 1회로 센다
 
 
+def test_after_ai_fills_everything_the_notice_matches_the_situation(monkeypatch, sleeps):
+    # 예전: AI 추천을 받은 뒤에도 "AI 추천이 필요 없습니다"가 떠서 헷갈렸다
+    monkeypatch.setenv(ai_match.KEY_NAME, "test-key")
+    monkeypatch.setattr(ai_match, "call_gemini", Scripted("ok"))
+    at = open_demo()
+    at.button(key="ai_btn").click().run()
+    captions = texts(at.caption)
+    assert "모든 열이 매칭되었습니다" in captions and "AI 추천이 필요 없습니다" not in captions
+
+
+def test_samples_matched_by_synonyms_say_ai_not_needed():
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.run()
+    at.button(key="sample_btn").click().run()
+    captions = texts(at.caption)
+    assert "AI 추천이 필요 없습니다" in captions and "모든 열이 매칭되었습니다" not in captions
+
+
 def test_app_busy_message_and_session_count_not_used(monkeypatch, sleeps):
     monkeypatch.setenv(ai_match.KEY_NAME, "test-key")
     fake = Scripted(ApiError(503))

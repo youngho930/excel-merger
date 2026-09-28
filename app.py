@@ -392,7 +392,16 @@ def render_ai(scenario) -> None:
         if not api_key:
             st.info(f"{ai_match.NO_AI_NOTICE}입니다. AI 추천을 쓰려면 관리자가 GEMINI_API_KEY를 설정해야 합니다.")
         if not need:
-            st.caption("동의어로 매칭되지 않은 기준열·원본 열이 없어 AI 추천이 필요 없습니다.")
+            matches = [m for p in ss.plans for m in p.match.matches]
+            has_ai = any(m.method == AI for m in matches)
+            all_filled = all(m.source_index is not None for m in matches)
+            if has_ai and all_filled:
+                st.caption("모든 열이 매칭되었습니다. 'AI 추천'으로 표시된 항목이 맞는지 아래 확인표에서 확인해 주세요.")
+            elif has_ai:
+                st.caption("AI 추천을 채웠고, 남은 원본 열이 없어 더 물어볼 열이 없습니다. "
+                           "'AI 추천'으로 표시된 항목이 맞는지 아래 확인표에서 확인해 주세요.")
+            else:
+                st.caption("동의어로 매칭되지 않은 기준열·원본 열이 없어 AI 추천이 필요 없습니다.")
         else:
             with_examples = st.checkbox(
                 "예시값 함께 보내기", key="ai_examples",
