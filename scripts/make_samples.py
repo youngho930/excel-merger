@@ -1,13 +1,15 @@
-"""샘플 엑셀 9개와 정답지(samples/expected_errors.md)를 만든다.
+"""샘플 엑셀 9개와 정답지(samples/expected_errors.md, samples/expected_errors.json)를 만든다.
 
 실행: python scripts/make_samples.py
 
 같은 시나리오 안에서도 파일마다 열 이름·열 순서·날짜 형식을 다르게 하고,
 오류를 일부러 심는다. 심은 오류는 그대로 정답지에 기록되므로
+(사람이 읽는 .md, 테스트가 자동 대조하는 .json)
 샘플과 정답지는 항상 이 스크립트로 함께 다시 만든다.
 """
 
 import copy
+import json
 import random
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -95,7 +97,9 @@ class SampleFile:
             "key": key,
             "kind": kind,
             "value": shown if shown is not None else value,
+            "raw": value,
             "desc": desc,
+            "duplicate_of": None,
         })
 
     def plant_duplicate(self, idx, source, src_idx, dup_keys):
@@ -111,7 +115,9 @@ class SampleFile:
             "key": " + ".join(dup_keys),
             "kind": DUPLICATE,
             "value": key_text,
+            "raw": None,
             "desc": f"{source.filename} {source.excel_row(src_idx)}행과 중복기준 값이 같음",
+            "duplicate_of": {"file": source.filename, "row": source.excel_row(src_idx)},
         })
 
     def save(self, folder):
@@ -434,6 +440,41 @@ def write_answer_key(results):
     return total
 
 
+def json_value(v):
+    if isinstance(v, date):
+        return v.isoformat()
+    return v
+
+
+def write_answer_json(results):
+    """테스트가 자동으로 대조하는 정답지. .md와 같은 기록에서 만든다."""
+    data = {"version": 1, "scenarios": {}}
+    for folder, title, files in results:
+        errors = []
+        for f in files:
+            for e in sorted(f.errors, key=lambda e: e["row"]):
+                errors.append({
+                    "file": f.filename,
+                    "row": e["row"],
+                    "column": e["col"],        # 파일에 실제로 쓰인 열 이름 (중복은 "(행 전체)")
+                    "standard": e["key"],      # 기준명 (중복은 "품번 + 로트번호" 형태)
+                    "kind": e["kind"],
+                    "value": json_value(e["raw"]),
+                    "shown": md_value(e["value"]),
+                    "description": e["desc"],
+                    "duplicate_of": e["duplicate_of"],
+                })
+        data["scenarios"][folder] = {
+            "name": title,
+            "folder": folder,
+            "files": [{"file": f.filename, "header_row": f.header_row, "data_rows": len(f.rows)}
+                      for f in files],
+            "errors": errors,
+        }
+    (SAMPLES / "expected_errors.json").write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def main():
     rng = random.Random(20260928)  # 고정 시드: 몇 번을 돌려도 같은 샘플
     results = []
@@ -446,7 +487,8 @@ def main():
             print(f"  {folder}/{f.filename}: 데이터 {len(f.rows)}행, 오류 {len(f.errors)}건")
         results.append((folder, title, files))
     total = write_answer_key(results)
-    print(f"정답지 작성: samples/expected_errors.md (총 {total}건)")
+    write_answer_json(results)
+    print(f"정답지 작성: samples/expected_errors.md, samples/expected_errors.json (총 {total}건)")
 
 
 if __name__ == "__main__":

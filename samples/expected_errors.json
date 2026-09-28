@@ -1,0 +1,496 @@
+{
+  "version": 1,
+  "scenarios": {
+    "incoming_inspection": {
+      "name": "협력사 수입검사 결과",
+      "folder": "incoming_inspection",
+      "files": [
+        {
+          "file": "수입검사_대성정공.xlsx",
+          "header_row": 1,
+          "data_rows": 15
+        },
+        {
+          "file": "수입검사_미래부품.xlsx",
+          "header_row": 1,
+          "data_rows": 12
+        },
+        {
+          "file": "수입검사_한일정밀.xlsx",
+          "header_row": 3,
+          "data_rows": 18
+        }
+      ],
+      "errors": [
+        {
+          "file": "수입검사_대성정공.xlsx",
+          "row": 6,
+          "column": "로트번호",
+          "standard": "로트번호",
+          "kind": "필수값 빈칸",
+          "value": null,
+          "shown": "(빈칸)",
+          "description": "필수 열 '로트번호'가 비어 있음",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_대성정공.xlsx",
+          "row": 9,
+          "column": "입고수량",
+          "standard": "입고수량",
+          "kind": "형식 오류",
+          "value": "12개",
+          "shown": "12개",
+          "description": "정수 칸에 문자('개')가 섞임",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_대성정공.xlsx",
+          "row": 12,
+          "column": "불량수량",
+          "standard": "불량수량",
+          "kind": "범위 밖 값",
+          "value": -2,
+          "shown": "-2",
+          "description": "수량이 음수 (허용 범위 0~100000)",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_대성정공.xlsx",
+          "row": 14,
+          "column": "판정",
+          "standard": "판정",
+          "kind": "허용값 아닌 값",
+          "value": "합격 ",
+          "shown": "\"합격 \" (뒤에 공백)",
+          "description": "'합격' 뒤에 공백이 있어 허용값과 다름",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_미래부품.xlsx",
+          "row": 4,
+          "column": "품목코드",
+          "standard": "품번",
+          "kind": "필수값 빈칸",
+          "value": null,
+          "shown": "(빈칸)",
+          "description": "필수 열 '품번'이 비어 있음",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_미래부품.xlsx",
+          "row": 7,
+          "column": "검사결과",
+          "standard": "판정",
+          "kind": "허용값 아닌 값",
+          "value": "OK",
+          "shown": "OK",
+          "description": "허용값(합격/불합격)이 아닌 'OK'",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_미래부품.xlsx",
+          "row": 8,
+          "column": "검사일자",
+          "standard": "검사일",
+          "kind": "형식 오류",
+          "value": "2026.13.02",
+          "shown": "2026.13.02",
+          "description": "존재하지 않는 날짜(13월)",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_미래부품.xlsx",
+          "row": 11,
+          "column": "샘플수량",
+          "standard": "검사수량",
+          "kind": "형식 오류",
+          "value": "20EA",
+          "shown": "20EA",
+          "description": "정수 칸에 문자('EA')가 섞임",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_미래부품.xlsx",
+          "row": 13,
+          "column": "(행 전체)",
+          "standard": "품번 + 로트번호",
+          "kind": "중복 행",
+          "value": null,
+          "shown": "품번=HB-1001, 로트번호=DS260901-02",
+          "description": "수입검사_대성정공.xlsx 3행과 중복기준 값이 같음",
+          "duplicate_of": {
+            "file": "수입검사_대성정공.xlsx",
+            "row": 3
+          }
+        },
+        {
+          "file": "수입검사_한일정밀.xlsx",
+          "row": 7,
+          "column": "Recv Qty",
+          "standard": "입고수량",
+          "kind": "범위 밖 값",
+          "value": -50,
+          "shown": "-50",
+          "description": "수량이 음수 (허용 범위 0~100000)",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_한일정밀.xlsx",
+          "row": 12,
+          "column": "Result",
+          "standard": "판정",
+          "kind": "허용값 아닌 값",
+          "value": "Pass",
+          "shown": "Pass",
+          "description": "허용값(합격/불합격)이 아닌 'Pass'",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_한일정밀.xlsx",
+          "row": 15,
+          "column": "Result",
+          "standard": "판정",
+          "kind": "필수값 빈칸",
+          "value": null,
+          "shown": "(빈칸)",
+          "description": "필수 열 '판정'이 비어 있음",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_한일정밀.xlsx",
+          "row": 18,
+          "column": "Insp Qty",
+          "standard": "검사수량",
+          "kind": "형식 오류",
+          "value": "32개",
+          "shown": "32개",
+          "description": "정수 칸에 문자('개')가 섞임",
+          "duplicate_of": null
+        },
+        {
+          "file": "수입검사_한일정밀.xlsx",
+          "row": 20,
+          "column": "(행 전체)",
+          "standard": "품번 + 로트번호",
+          "kind": "중복 행",
+          "value": null,
+          "shown": "품번=HB-5200, 로트번호=MR260903-05",
+          "description": "수입검사_미래부품.xlsx 6행과 중복기준 값이 같음",
+          "duplicate_of": {
+            "file": "수입검사_미래부품.xlsx",
+            "row": 6
+          }
+        }
+      ]
+    },
+    "stock_count": {
+      "name": "지점·창고 재고실사",
+      "folder": "stock_count",
+      "files": [
+        {
+          "file": "재고실사_평택1창고.xlsx",
+          "header_row": 1,
+          "data_rows": 15
+        },
+        {
+          "file": "재고실사_구미창고.xlsx",
+          "header_row": 1,
+          "data_rows": 12
+        },
+        {
+          "file": "재고실사_부산물류센터.xlsx",
+          "header_row": 3,
+          "data_rows": 16
+        }
+      ],
+      "errors": [
+        {
+          "file": "재고실사_평택1창고.xlsx",
+          "row": 4,
+          "column": "실사수량",
+          "standard": "실사수량",
+          "kind": "필수값 빈칸",
+          "value": null,
+          "shown": "(빈칸)",
+          "description": "필수 열 '실사수량'이 비어 있음",
+          "duplicate_of": null
+        },
+        {
+          "file": "재고실사_평택1창고.xlsx",
+          "row": 7,
+          "column": "실사수량",
+          "standard": "실사수량",
+          "kind": "형식 오류",
+          "value": "12개",
+          "shown": "12개",
+          "description": "정수 칸에 문자('개')가 섞임",
+          "duplicate_of": null
+        },
+        {
+          "file": "재고실사_평택1창고.xlsx",
+          "row": 11,
+          "column": "전산수량",
+          "standard": "전산수량",
+          "kind": "범위 밖 값",
+          "value": -5,
+          "shown": "-5",
+          "description": "수량이 음수 (허용 범위 0~1000000)",
+          "duplicate_of": null
+        },
+        {
+          "file": "재고실사_평택1창고.xlsx",
+          "row": 14,
+          "column": "단위",
+          "standard": "단위",
+          "kind": "허용값 아닌 값",
+          "value": "개",
+          "shown": "개",
+          "description": "허용 단위(EA/BOX/KG/M/SET/ROLL)가 아닌 '개'",
+          "duplicate_of": null
+        },
+        {
+          "file": "재고실사_구미창고.xlsx",
+          "row": 3,
+          "column": "Item Code",
+          "standard": "품번",
+          "kind": "필수값 빈칸",
+          "value": null,
+          "shown": "(빈칸)",
+          "description": "필수 열 '품번'이 비어 있음",
+          "duplicate_of": null
+        },
+        {
+          "file": "재고실사_구미창고.xlsx",
+          "row": 6,
+          "column": "Count Date",
+          "standard": "실사일",
+          "kind": "형식 오류",
+          "value": "2026.9.31",
+          "shown": "2026.9.31",
+          "description": "존재하지 않는 날짜(9월 31일)",
+          "duplicate_of": null
+        },
+        {
+          "file": "재고실사_구미창고.xlsx",
+          "row": 9,
+          "column": "Count Qty",
+          "standard": "실사수량",
+          "kind": "범위 밖 값",
+          "value": -3,
+          "shown": "-3",
+          "description": "수량이 음수 (허용 범위 0~1000000)",
+          "duplicate_of": null
+        },
+        {
+          "file": "재고실사_구미창고.xlsx",
+          "row": 12,
+          "column": "UOM",
+          "standard": "단위",
+          "kind": "허용값 아닌 값",
+          "value": "박스",
+          "shown": "박스",
+          "description": "허용 단위(EA/BOX/KG/M/SET/ROLL)가 아닌 '박스'",
+          "duplicate_of": null
+        },
+        {
+          "file": "재고실사_구미창고.xlsx",
+          "row": 13,
+          "column": "(행 전체)",
+          "standard": "창고 + 품번",
+          "kind": "중복 행",
+          "value": null,
+          "shown": "창고=평택1창고, 품번=AS-5004",
+          "description": "재고실사_평택1창고.xlsx 5행과 중복기준 값이 같음",
+          "duplicate_of": {
+            "file": "재고실사_평택1창고.xlsx",
+            "row": 5
+          }
+        },
+        {
+          "file": "재고실사_부산물류센터.xlsx",
+          "row": 7,
+          "column": "담당자",
+          "standard": "실사자",
+          "kind": "필수값 빈칸",
+          "value": null,
+          "shown": "(빈칸)",
+          "description": "필수 열 '실사자'가 비어 있음",
+          "duplicate_of": null
+        },
+        {
+          "file": "재고실사_부산물류센터.xlsx",
+          "row": 10,
+          "column": "장부수량",
+          "standard": "전산수량",
+          "kind": "형식 오류",
+          "value": "약 120",
+          "shown": "약 120",
+          "description": "정수 칸에 문자('약')가 섞임",
+          "duplicate_of": null
+        },
+        {
+          "file": "재고실사_부산물류센터.xlsx",
+          "row": 14,
+          "column": "실재고",
+          "standard": "실사수량",
+          "kind": "범위 밖 값",
+          "value": -10,
+          "shown": "-10",
+          "description": "수량이 음수 (허용 범위 0~1000000)",
+          "duplicate_of": null
+        },
+        {
+          "file": "재고실사_부산물류센터.xlsx",
+          "row": 18,
+          "column": "(행 전체)",
+          "standard": "창고 + 품번",
+          "kind": "중복 행",
+          "value": null,
+          "shown": "창고=구미창고, 품번=RM-2001",
+          "description": "재고실사_구미창고.xlsx 7행과 중복기준 값이 같음",
+          "duplicate_of": {
+            "file": "재고실사_구미창고.xlsx",
+            "row": 7
+          }
+        }
+      ]
+    },
+    "monthly_report": {
+      "name": "부서별 월간 실적",
+      "folder": "monthly_report",
+      "files": [
+        {
+          "file": "월간실적_영업팀.xlsx",
+          "header_row": 1,
+          "data_rows": 11
+        },
+        {
+          "file": "월간실적_생산팀.xlsx",
+          "header_row": 3,
+          "data_rows": 12
+        },
+        {
+          "file": "월간실적_품질팀.xlsx",
+          "header_row": 1,
+          "data_rows": 11
+        }
+      ],
+      "errors": [
+        {
+          "file": "월간실적_영업팀.xlsx",
+          "row": 4,
+          "column": "실적",
+          "standard": "실적",
+          "kind": "필수값 빈칸",
+          "value": null,
+          "shown": "(빈칸)",
+          "description": "필수 열 '실적'이 비어 있음",
+          "duplicate_of": null
+        },
+        {
+          "file": "월간실적_영업팀.xlsx",
+          "row": 7,
+          "column": "목표",
+          "standard": "목표",
+          "kind": "형식 오류",
+          "value": "95%",
+          "shown": "95%",
+          "description": "실수 칸에 문자('%')가 섞임",
+          "duplicate_of": null
+        },
+        {
+          "file": "월간실적_영업팀.xlsx",
+          "row": 10,
+          "column": "부서",
+          "standard": "부서",
+          "kind": "허용값 아닌 값",
+          "value": "영업 팀",
+          "shown": "영업 팀",
+          "description": "허용 부서명이 아님 ('영업팀'에 공백)",
+          "duplicate_of": null
+        },
+        {
+          "file": "월간실적_생산팀.xlsx",
+          "row": 5,
+          "column": "KPI",
+          "standard": "항목",
+          "kind": "필수값 빈칸",
+          "value": null,
+          "shown": "(빈칸)",
+          "description": "필수 열 '항목'이 비어 있음",
+          "duplicate_of": null
+        },
+        {
+          "file": "월간실적_생산팀.xlsx",
+          "row": 8,
+          "column": "Actual",
+          "standard": "실적",
+          "kind": "범위 밖 값",
+          "value": -120,
+          "shown": "-120",
+          "description": "실적이 음수 (허용 범위 0 이상)",
+          "duplicate_of": null
+        },
+        {
+          "file": "월간실적_생산팀.xlsx",
+          "row": 11,
+          "column": "Target",
+          "standard": "목표",
+          "kind": "형식 오류",
+          "value": "약 500",
+          "shown": "약 500",
+          "description": "실수 칸에 문자('약')가 섞임",
+          "duplicate_of": null
+        },
+        {
+          "file": "월간실적_품질팀.xlsx",
+          "row": 5,
+          "column": "실적치",
+          "standard": "실적",
+          "kind": "형식 오류",
+          "value": "3건",
+          "shown": "3건",
+          "description": "실수 칸에 문자('건')가 섞임",
+          "duplicate_of": null
+        },
+        {
+          "file": "월간실적_품질팀.xlsx",
+          "row": 8,
+          "column": "Dept",
+          "standard": "부서",
+          "kind": "허용값 아닌 값",
+          "value": "QA팀",
+          "shown": "QA팀",
+          "description": "허용 부서명이 아닌 'QA팀'",
+          "duplicate_of": null
+        },
+        {
+          "file": "월간실적_품질팀.xlsx",
+          "row": 11,
+          "column": "목표치",
+          "standard": "목표",
+          "kind": "범위 밖 값",
+          "value": -1,
+          "shown": "-1",
+          "description": "목표가 음수 (허용 범위 0 이상)",
+          "duplicate_of": null
+        },
+        {
+          "file": "월간실적_품질팀.xlsx",
+          "row": 12,
+          "column": "(행 전체)",
+          "standard": "부서 + 월 + 항목",
+          "kind": "중복 행",
+          "value": null,
+          "shown": "부서=생산팀, 월=2026-08-01, 항목=에너지사용량(MWh)",
+          "description": "월간실적_생산팀.xlsx 12행과 중복기준 값이 같음",
+          "duplicate_of": {
+            "file": "월간실적_생산팀.xlsx",
+            "row": 12
+          }
+        }
+      ]
+    }
+  }
+}
