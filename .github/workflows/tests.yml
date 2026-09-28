@@ -28,6 +28,12 @@ jobs:
       - name: 패키지 설치
         run: pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: 하위 프로세스 기본 메모리 (진단)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -c "from engine.jobs import run_job; print('::notice title=하위 프로세스 메모리(MB)::', run_job('mem_info', timeout=60))"
+
       - name: pytest (실제 Gemini API 는 부르지 않음 — 모든 AI 테스트는 가짜 응답)
         env:
           PYTHONIOENCODING: utf-8

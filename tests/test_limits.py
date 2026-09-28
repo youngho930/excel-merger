@@ -101,10 +101,18 @@ def test_set_max_concurrent():
 
 # ------------------------------------------------------------------ 메모리 상한 (Linux)
 @pytest.mark.skipif(not LINUX, reason="작업별 메모리 상한(RLIMIT_DATA)은 Linux에서만 동작")
+def test_child_baseline_memory_leaves_room_under_cloud_limit():
+    # 하위 프로세스가 아무것도 안 할 때의 데이터 메모리. OpenBLAS 등이 코어 수만큼 버퍼를 잡으면 커진다
+    info = run_job("mem_info", timeout=60)
+    assert info["VmData"] < CLOUD.job_memory_mb // 2, info
+
+
+@pytest.mark.skipif(not LINUX, reason="작업별 메모리 상한(RLIMIT_DATA)은 Linux에서만 동작")
 def test_memory_limit_stops_only_that_job():
+    info = run_job("mem_info", timeout=60)
     with pytest.raises(JobError, match="메모리가 부족합니다"):
         run_job("alloc", 800, timeout=60, memory_mb=200)
-    assert run_job("alloc", 50, timeout=60, memory_mb=200) == 50
+    assert run_job("alloc", 50, timeout=60, memory_mb=200) == 50, info
 
 
 @pytest.mark.skipif(not LINUX, reason="작업별 메모리 상한(RLIMIT_DATA)은 Linux에서만 동작")

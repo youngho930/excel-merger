@@ -77,6 +77,21 @@ def _job_alloc(mb):
     return len(block) // (1024 * 1024)
 
 
+def _job_mem_info():
+    """자식 프로세스의 메모리 사용량 (Linux 진단용, MB). 다른 OS에서는 빈 dict."""
+    info = {}
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                if key in ("VmData", "VmRSS", "VmPeak"):
+                    info[key] = int(rest.split()[0]) // 1024
+    except OSError:
+        pass
+    info["numpy_loaded"] = "numpy" in sys.modules
+    return info
+
+
 JOBS = {
     "prepare": _job_prepare,
     "execute": _job_execute,
@@ -84,6 +99,7 @@ JOBS = {
     "sleep": _job_sleep,
     "env_names": _job_env_names,
     "alloc": _job_alloc,
+    "mem_info": _job_mem_info,
 }
 
 
@@ -108,8 +124,16 @@ def set_max_concurrent(n: int) -> None:
 _SECRET_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
 
 
+# openpyxl 이 numpy 를 불러오면 OpenBLAS 등이 CPU 코어 수만큼 스레드 버퍼를 미리 잡는다.
+# 엔진은 수치 계산을 하지 않으므로 1개로 고정해 작업별 메모리 상한(RLIMIT_DATA)에 걸리지 않게 한다
+# (GitHub Actions Ubuntu 에서 200MB 상한인데 50MB만 잡아도 MemoryError 가 났었다).
+_SINGLE_THREAD_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+                      "NUMEXPR_NUM_THREADS": "1", "VECLIB_MAXIMUM_THREADS": "1"}
+
+
 def child_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not any(w in k.upper() for w in _SECRET_WORDS)}
+    env.update(_SINGLE_THREAD_ENV)
     env["PYTHONPATH"] = str(ROOT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     return env
 

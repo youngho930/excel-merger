@@ -263,10 +263,39 @@ def call_gemini(prompt: str, api_key: str, model: str, timeout: float = CALL_TIM
 
 
 # ------------------------------------------------------------------ 응답 검증
+MAX_JSON_DEPTH = 10   # 기대하는 응답은 {"matches": [{...}]} 로 깊이 3
+
+
+def _json_depth(text: str) -> int:
+    """문자열 밖의 [ { 중첩 깊이 최댓값 (파싱하지 않고 한 번 훑는다)."""
+    depth = deepest = 0
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif ch in "]}":
+            depth -= 1
+    return deepest
+
+
 def parse_response(text: Any, request: dict[str, Any], plans) -> AiOutcome:
     """응답을 검증해 받아들일 추천만 남긴다. JSON이 깨졌거나 형식이 다르면 AiError (전부 버림)."""
     broken = "AI 응답을 해석하지 못했습니다(올바른 JSON 형식이 아님). 추천은 모두 버렸습니다."
     if not isinstance(text, str) or len(text) > MAX_RESPONSE_CHARS:
+        raise AiError(broken)
+    # 파싱 전에 중첩 깊이를 직접 검사한다. json 의 재귀 한도는 운영체제마다 달라서
+    # (Windows 에서는 RecursionError, Linux 에서는 그대로 파싱) 결과가 갈렸다.
+    if _json_depth(text) > MAX_JSON_DEPTH:
         raise AiError(broken)
     try:
         data = json.loads(text)
