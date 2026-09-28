@@ -369,12 +369,12 @@ SCENARIOS = [
 
 DATE_NOTES = {
     as_datetime: "엑셀 날짜 셀",
-    dotted: "문자 `2026.09.03`",
-    slashed: "문자 `2026/09/05`",
-    dotted_short: "문자 `2026.9.26`",
-    korean: "문자 `2026년 9월 26일`",
-    month_dash: "문자 `2026-08`",
-    month_korean: "문자 `2026년 8월`",
+    dotted: "문자 `YYYY.MM.DD`",
+    slashed: "문자 `YYYY/MM/DD`",
+    dotted_short: "문자 `YYYY.M.D`",
+    korean: "문자 `YYYY년 M월 D일`",
+    month_dash: "문자 `YYYY-MM`",
+    month_korean: "문자 `YYYY년 M월`",
 }
 
 
