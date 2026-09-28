@@ -31,4 +31,15 @@ jobs:
       - name: pytest (실제 Gemini API 는 부르지 않음 — 모든 AI 테스트는 가짜 응답)
         env:
           PYTHONIOENCODING: utf-8
-        run: python -m pytest -q -rs
+        run: |
+          set -o pipefail
+          python -m pytest -q -rs -rf --tb=short -p no:cacheprovider 2>&1 | tee pytest.log
+
+      # 실패하면 실패한 테스트와 오류 줄을 주석(annotation)으로 남긴다.
+      # 공개 저장소의 주석은 로그인 없이도 보인다 (작업 로그는 로그인해야 보인다).
+      - name: 실패 요약
+        if: failure()
+        run: |
+          { echo "## pytest 실패"; echo '```'; grep -E "^(FAILED|ERROR) |^E  " pytest.log | head -60; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          grep -E "^(FAILED|ERROR) " pytest.log | head -10 | while IFS= read -r line; do echo "::error title=pytest 실패::$line"; done
+          grep -E "^E  " pytest.log | head -10 | while IFS= read -r line; do echo "::error title=pytest 오류 내용::$line"; done
