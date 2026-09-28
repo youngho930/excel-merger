@@ -174,7 +174,7 @@ def inspection_rows(rng, supplier, lot_prefix, count, start):
         inspected = min(received, rng.choice([13, 20, 32, 50]))
         defects = rng.choice([0, 0, 0, 0, 1, 2])
         rows.append({
-            "품번": code, "품명": name,
+            "품목코드": code, "품목명": name,
             "로트번호": f"{lot_prefix}{d:%y%m%d}-{i + 1:02d}",
             "협력사": supplier, "검사일": d,
             "입고수량": received, "검사수량": inspected, "불량수량": defects,
@@ -184,11 +184,11 @@ def inspection_rows(rng, supplier, lot_prefix, count, start):
 
 
 def build_incoming(rng):
-    dup_keys = ["품번", "로트번호"]
+    dup_keys = ["품목코드", "로트번호"]
 
     a = SampleFile(
         "수입검사_대성정공.xlsx", "Sheet1",
-        [("품번", "품번"), ("품명", "품명"), ("로트번호", "로트번호"), ("협력사", "협력사"),
+        [("품목코드", "품번"), ("품목명", "품명"), ("로트번호", "로트번호"), ("협력사", "협력사"),
          ("검사일", "검사일"), ("입고수량", "입고수량"), ("검사수량", "검사수량"),
          ("불량수량", "불량수량"), ("판정", "판정")],
         ["검사일"], as_datetime,
@@ -201,13 +201,13 @@ def build_incoming(rng):
 
     b = SampleFile(
         "수입검사_미래부품.xlsx", "검사결과",
-        [("검사일", "검사일자"), ("협력사", "업체명"), ("품번", "품목코드"), ("품명", "품목명"),
+        [("검사일", "검사일자"), ("협력사", "업체명"), ("품목코드", "품목코드"), ("품목명", "품목명"),
          ("로트번호", "LOT No"), ("판정", "검사결과"), ("입고수량", "입고량"),
          ("검사수량", "샘플수량"), ("불량수량", "불량수")],
         ["검사일"], dotted,
         inspection_rows(rng, "(주)미래부품", "MR", 12, date(2026, 9, 2)),
     )
-    b.plant(2, "품번", BLANK, REQUIRED, "필수 열 '품번'이 비어 있음")
+    b.plant(2, "품목코드", BLANK, REQUIRED, "필수 열 '품목코드'이 비어 있음")
     b.plant(5, "판정", "OK", ALLOWED, "허용값(합격/불합격)이 아닌 'OK'")
     b.plant(6, "검사일", "2026.13.02", FORMAT, "존재하지 않는 날짜(13월)")
     b.plant(9, "검사수량", "20EA", FORMAT, "정수 칸에 문자('EA')가 섞임")
@@ -215,7 +215,7 @@ def build_incoming(rng):
 
     c = SampleFile(
         "수입검사_한일정밀.xlsx", "Inspection",
-        [("로트번호", "Lot"), ("품번", "Part No"), ("품명", "Part Name"), ("협력사", "Supplier"),
+        [("로트번호", "Lot"), ("품목코드", "Part No"), ("품목명", "Part Name"), ("협력사", "Supplier"),
          ("입고수량", "Recv Qty"), ("검사수량", "Insp Qty"), ("불량수량", "NG Qty"),
          ("판정", "Result"), ("검사일", "Insp. Date")],
         ["검사일"], slashed,
@@ -251,7 +251,7 @@ def stock_rows(rng, warehouse, counters, count, day):
         book = rng.randint(10, 500)
         counted = book + rng.choice([0, 0, 0, 0, -1, 1, -2, 3])
         rows.append({
-            "창고": warehouse, "품번": code, "품명": name, "단위": unit,
+            "창고": warehouse, "품목코드": code, "품목명": name, "단위": unit,
             "전산수량": book, "실사수량": counted,
             "실사자": rng.choice(counters), "실사일": day,
         })
@@ -259,11 +259,11 @@ def stock_rows(rng, warehouse, counters, count, day):
 
 
 def build_stock(rng):
-    dup_keys = ["창고", "품번"]
+    dup_keys = ["창고", "품목코드"]
 
     a = SampleFile(
         "재고실사_평택1창고.xlsx", "Sheet1",
-        [("창고", "창고"), ("품번", "품번"), ("품명", "품명"), ("단위", "단위"),
+        [("창고", "창고"), ("품목코드", "품번"), ("품목명", "품명"), ("단위", "단위"),
          ("전산수량", "전산수량"), ("실사수량", "실사수량"), ("실사자", "실사자"), ("실사일", "실사일")],
         ["실사일"], as_datetime,
         stock_rows(rng, "평택1창고", ["김철수", "이영희"], 15, date(2026, 9, 26)),
@@ -275,12 +275,12 @@ def build_stock(rng):
 
     b = SampleFile(
         "재고실사_구미창고.xlsx", "재고",
-        [("품번", "Item Code"), ("품명", "Description"), ("창고", "Warehouse"), ("실사일", "Count Date"),
+        [("품목코드", "Item Code"), ("품목명", "Description"), ("창고", "Warehouse"), ("실사일", "Count Date"),
          ("단위", "UOM"), ("실사수량", "Count Qty"), ("전산수량", "Book Qty"), ("실사자", "Counter")],
         ["실사일"], dotted_short,
         stock_rows(rng, "구미창고", ["박민수", "최지은"], 12, date(2026, 9, 26)),
     )
-    b.plant(1, "품번", BLANK, REQUIRED, "필수 열 '품번'이 비어 있음")
+    b.plant(1, "품목코드", BLANK, REQUIRED, "필수 열 '품목코드'이 비어 있음")
     b.plant(4, "실사일", "2026.9.31", FORMAT, "존재하지 않는 날짜(9월 31일)")
     b.plant(7, "실사수량", -3, RANGE, "수량이 음수 (허용 범위 0~1000000)")
     b.plant(10, "단위", "박스", ALLOWED, "허용 단위(EA/BOX/KG/M/SET/ROLL)가 아닌 '박스'")
@@ -288,7 +288,7 @@ def build_stock(rng):
 
     c = SampleFile(
         "재고실사_부산물류센터.xlsx", "실사표",
-        [("실사일", "실사일자"), ("창고", "창고명"), ("품번", "품목코드"), ("품명", "자재명"),
+        [("실사일", "실사일자"), ("창고", "창고명"), ("품목코드", "품목코드"), ("품목명", "자재명"),
          ("단위", "단위"), ("전산수량", "장부수량"), ("실사수량", "실재고"), ("실사자", "담당자")],
         ["실사일"], korean,
         stock_rows(rng, "부산물류센터", ["정우성", "한지민"], 16, date(2026, 9, 27)),
@@ -457,7 +457,7 @@ def write_answer_json(results):
                     "file": f.filename,
                     "row": e["row"],
                     "column": e["col"],        # 파일에 실제로 쓰인 열 이름 (중복은 "(행 전체)")
-                    "standard": e["key"],      # 기준명 (중복은 "품번 + 로트번호" 형태)
+                    "standard": e["key"],      # 기준명 (중복은 "품목코드 + 로트번호" 형태)
                     "kind": e["kind"],
                     "value": json_value(e["raw"]),
                     "shown": md_value(e["value"]),

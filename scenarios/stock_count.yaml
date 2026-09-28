@@ -5,12 +5,12 @@ columns:
     동의어: [창고명, 보관장소, 지점, 로케이션, Warehouse]
     필수: true
     형식: 문자
-  - 기준명: 품번
-    동의어: [품목코드, 부품번호, Part No, P/N, Item Code]
+  - 기준명: 품목코드
+    동의어: [품번, 부품번호, Part No, P/N, Item Code]
     필수: true
     형식: 문자
-  - 기준명: 품명
-    동의어: [품목명, 부품명, 자재명, Part Name, Description]
+  - 기준명: 품목명
+    동의어: [품명, 부품명, 자재명, Part Name, Description]
     필수: false
     형식: 문자
   - 기준명: 단위
@@ -36,4 +36,4 @@ columns:
     동의어: [실사일자, 조사일, 점검일, Count Date]
     필수: true
     형식: 날짜
-중복기준: [창고, 품번]
+중복기준: [창고, 품목코드]
