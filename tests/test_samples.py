@@ -115,7 +115,7 @@ def test_result_workbook(key, tmp_path):
         assert path.read_bytes() == data
 
     wb = load_workbook(out)
-    assert wb.sheetnames == ["취합결과", "오류목록", "범례"]
+    assert wb.sheetnames == ["취합결과", "오류목록", "요약", "범례"]   # 아무것도 제외하지 않으면 "제외된 행" 없음
     ws = wb["취합결과"]
     header = [c.value for c in ws[1]]
     assert header == ["출처 파일", "원래 행"] + sc.column_names
@@ -135,3 +135,6 @@ def test_result_workbook(key, tmp_path):
     assert [c.value for c in es[1]][:9] == ["파일", "행", "열", "기준열", "오류 종류", "값", "설명",
                                             "수정 제안값", "중복 그룹"]
     assert sum(1 for r in range(2, es.max_row + 1) if es.cell(r, 1).value) == len(result.issues)
+    # 처리 열은 항상 있고, 아무것도 처리하지 않았으면 전부 빈칸
+    assert es.cell(1, 10).value == "처리" and es.max_column == 10
+    assert all(es.cell(r, 10).value is None for r in range(2, es.max_row + 1))

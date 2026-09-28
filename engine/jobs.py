@@ -53,9 +53,9 @@ def _job_execute(scenario, plans, out_dir, apply_suggestions=False):
     return result, path
 
 
-def _job_write(result, out_dir, apply_suggestions=False):
+def _job_write(result, out_dir, apply_suggestions=False, excluded=()):
     from .writer import write_result
-    return write_result(result, out_dir, apply_suggestions=apply_suggestions)
+    return write_result(result, out_dir, apply_suggestions=apply_suggestions, excluded=excluded)
 
 
 def _job_sleep(seconds):

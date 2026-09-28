@@ -25,7 +25,7 @@ from engine.matching import USER
 from engine.merge import MAX_FILES
 from engine.normalize import display
 from engine.reader import EXCEL_SUFFIXES, MAX_FILE_BYTES, MAX_ROWS
-from engine.writer import ACTION_COL, AUTO_FIXED, ERROR_COLS
+from engine.writer import ACTION_COL, ERROR_COLS
 
 ROOT = Path(__file__).resolve().parent
 SCENARIO_DIR = ROOT / "scenarios"
@@ -37,6 +37,7 @@ MAX_TOTAL_ROWS = 200_000              # 모든 파일의 데이터 행 합계
 MB = 1024 * 1024
 SESSION_ROOT = Path(tempfile.gettempdir()) / "excel-merger-sessions"
 STALE_SECONDS = 6 * 3600              # 이보다 오래 쓰지 않은 세션 폴더는 지운다
+MAX_DUP_GROUPS_SHOWN = 50             # 화면에서 남길 행을 고를 수 있는 중복 그룹 수
 
 NO_SOURCE = "(선택 안 함)"
 
@@ -50,7 +51,10 @@ def reset_from(stage: str) -> None:
         ss.load_id = None
         ss.load_source = None
     ss.result = None
+    ss.result_id = None
     ss.outputs = {}
+    ss.current_output = None
+    ss.excluded = set()
 
 
 def on_scenario_change() -> None:
@@ -68,7 +72,7 @@ def init_state() -> None:
     ss = st.session_state
     defaults = {"plans": None, "load_id": None, "load_source": None, "result": None, "outputs": {},
                 "messages": [], "upload_sig": None, "uploader_n": 0, "map_error": None,
-                "apply_pref": False}
+                "apply_pref": False, "excluded": set(), "result_id": None, "current_output": None}
     for k, v in defaults.items():
         if k not in ss:
             ss[k] = v
@@ -271,20 +275,61 @@ def cell_text(v: Any) -> str:
     return display(v)
 
 
-def issues_frame(result, applied: bool) -> pd.DataFrame:
-    fixes = result.suggestion_map() if applied else {}
+def issues_frame(result, res) -> pd.DataFrame:
     rows = []
-    for i in result.issues:
-        r = [i.file, "(전체)" if i.row is None else i.row, i.column or "(없음)", i.standard, i.kind,
-             "(빈칸)" if i.value is None else cell_text(i.value), i.message,
-             cell_text(i.suggestion), i.dup_group or ""]
-        if applied:
-            r.append(AUTO_FIXED if (i.file, i.row, i.standard) in fixes else "")
-        rows.append(r)
-    cols = ERROR_COLS + ([ACTION_COL] if applied else [])
-    df = pd.DataFrame(rows, columns=cols)
+    for i, action in zip(result.issues, res.actions):
+        rows.append([i.file, "(전체)" if i.row is None else i.row, i.column or "(없음)", i.standard, i.kind,
+                     "(빈칸)" if i.value is None else cell_text(i.value), i.message,
+                     cell_text(i.suggestion), i.dup_group or "", action])
+    df = pd.DataFrame(rows, columns=ERROR_COLS)
     df["행"] = df["행"].astype(str)
     return df
+
+
+def current_resolution():
+    ss = st.session_state
+    return ss.result.resolve(ss.excluded, bool(ss.apply_pref))
+
+
+def on_keep_change(key: str, file: str, row: int) -> None:
+    ss = st.session_state
+    if ss[key]:
+        ss.excluded.discard((file, row))
+    else:
+        ss.excluded.add((file, row))
+
+
+def render_duplicates(result, res) -> None:
+    ss = st.session_state
+    groups = result.dup_groups()
+    if not groups:
+        return
+    st.subheader("5. 중복 행 고르기")
+    st.caption("중복 그룹마다 결과에 남길 행을 고르세요. 체크를 끈 행은 취합결과에서 빠지고 "
+               "'제외된 행' 시트에 원래 값으로 기록됩니다. 기본은 전부 남김입니다.")
+    names = result.scenario.column_names
+    items = list(groups.items())
+    if len(items) > MAX_DUP_GROUPS_SHOWN:
+        st.info(f"중복 그룹이 {len(items):,}개라 앞의 {MAX_DUP_GROUPS_SHOWN}개만 보여줍니다. "
+                "나머지 그룹은 모든 행을 남깁니다.")
+    for gi, (group, rows) in enumerate(items[:MAX_DUP_GROUPS_SHOWN]):
+        with st.container(border=True):
+            st.markdown(f"**{group}** · 중복기준 {' + '.join(result.scenario.dup_keys)} · {len(rows)}행")
+            st.dataframe(pd.DataFrame(
+                [{"출처 파일": r.source_file, "원래 행": str(r.excel_row), **{n: cell_text(r.raw[n]) for n in names}}
+                 for r in rows]), hide_index=True, width="stretch")
+            cols = st.columns(min(len(rows), 4))
+            for j, r in enumerate(rows):
+                key = f"keep_{ss.result_id}_{gi}_{j}"
+                if key not in ss:
+                    ss[key] = (r.source_file, r.excel_row) not in ss.excluded
+                cols[j % len(cols)].checkbox(f"남김: {r.source_file} {r.excel_row}행", key=key,
+                                             on_change=on_keep_change, args=(key, r.source_file, r.excel_row))
+            if group in res.fully_excluded_groups:
+                st.warning(f"{group}: 이 그룹의 행이 모두 빠집니다. 결과 파일에 이 그룹의 행이 하나도 남지 않습니다.")
+            elif any((r.source_file, r.excel_row) in res.resolved_rows for r in rows) and \
+                    any((r.source_file, r.excel_row) in res.excluded for r in rows):
+                st.caption("한 행만 남아 중복이 풀렸습니다. 남은 행의 중복 오류는 '중복 해소(이 행을 남김)'로 처리됩니다.")
 
 
 def run_merge(scenario) -> None:
@@ -301,40 +346,58 @@ def run_merge(scenario) -> None:
         say("error", str(e))
         return
     ss.result = result
-    ss.outputs = {applied: str(path)}
+    ss.result_id = uuid.uuid4().hex[:8]
+    ss.outputs = {output_key(applied, ()): str(path)}
 
 
-def output_for(applied: bool) -> Path | None:
+def output_key(applied: bool, excluded) -> str:
+    return f"{int(applied)}|" + "|".join(f"{f}:{r}" for f, r in sorted(excluded))
+
+
+def output_for(res) -> Path | None:
+    """지금 선택(제안값 적용, 뺀 행)에 맞는 결과 파일. 처음 고른 조합이면 새로 만든다."""
     ss = st.session_state
-    if applied not in ss.outputs:
+    key = output_key(res.apply_suggestions, res.excluded)
+    if key not in ss.outputs:
         try:
             with st.spinner("결과 파일을 만드는 중입니다…"):
-                ss.outputs[applied] = str(run_job("write", ss.result, out_dir(), applied, timeout=TIME_LIMIT))
+                ss.outputs[key] = str(run_job("write", ss.result, out_dir(), res.apply_suggestions,
+                                              sorted(res.excluded), timeout=TIME_LIMIT))
         except TimeLimitError as e:
             st.error(f"처리 시간 제한에 걸렸습니다. {e}")
             return None
         except (ReadError, ScenarioError, JobError) as e:
             st.error(str(e))
             return None
-    return Path(ss.outputs[applied])
+    ss.current_output = ss.outputs[key]
+    return Path(ss.outputs[key])
 
 
 def render_result() -> None:
     result = st.session_state.result
+    res = current_resolution()
     st.subheader("4. 실행 결과")
-    counts = result.counts()
     fixes = result.suggestion_map()
+    total, done, remaining = res.totals()
 
     top = st.columns(4)
-    top[0].metric("파일 수", f"{len(result.plans)}개")
-    top[1].metric("취합 행 수", f"{len(result.rows):,}행")
-    top[2].metric("오류 합계", f"{len(result.issues):,}건")
-    top[3].metric("수정 제안 있음", f"{len(fixes):,}건")
-    kinds = st.columns(len(KINDS))
-    for col, k in zip(kinds, KINDS):
-        col.metric(k, f"{counts[k]:,}건")
+    with top[0].container(border=True):
+        st.metric("남은 오류", f"{remaining:,}건",
+                  help="직접 확인해야 할 오류입니다. 전체 오류에서 처리됨(자동 수정·행 제외·중복 해소)을 뺀 수입니다.")
+    top[1].metric("전체 오류", f"{total:,}건")
+    top[2].metric("처리됨", f"{done:,}건")
+    top[3].metric("제외한 행", f"{len(res.excluded):,}개")
+    info = st.columns(4)
+    info[0].metric("파일 수", f"{len(result.plans)}개")
+    info[1].metric("취합 행 수", f"{len(result.rows) - len(res.excluded):,}행")
+    info[2].metric("수정 제안 있음", f"{len(fixes):,}건")
+    st.dataframe(pd.DataFrame([{"오류 종류": k, "전체": t, "처리됨": d, "남은 오류": r}
+                               for k, (t, d, r) in res.counts().items()]),
+                 hide_index=True, key="kind_table")
 
-    st.subheader("5. 결과 엑셀 받기")
+    render_duplicates(result, res)
+
+    st.subheader("6. 결과 엑셀 받기")
     if "apply_suggestions" not in st.session_state:
         st.session_state.apply_suggestions = st.session_state.apply_pref
     applied = st.checkbox(
@@ -345,19 +408,27 @@ def render_result() -> None:
         st.caption(f"제안값이 있는 {len(fixes):,}개 셀을 바꿔서 저장합니다. 나머지 오류 셀은 원래 값 그대로입니다.")
     else:
         st.caption("오류 셀은 원래 값 그대로 두고 색만 칠해서 저장합니다.")
-    path = output_for(applied)
+    if res.excluded:
+        st.caption(f"중복 그룹에서 뺀 {len(res.excluded):,}개 행은 '제외된 행' 시트로 옮겨 저장합니다.")
+    path = output_for(res)
     if path is not None and path.is_file():
         st.download_button("결과 엑셀 내려받기", data=path.read_bytes(), file_name=path.name,
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key="download", type="primary", on_click="ignore")
 
     st.subheader("오류 목록")
+    counts = result.counts()
     present = [k for k in KINDS if counts[k]]
-    chosen = st.multiselect("오류 종류로 거르기", options=list(KINDS), default=present, key="kind_filter",
+    f1, f2 = st.columns([1, 3], vertical_alignment="bottom")
+    only_remaining = f1.checkbox("남은 오류만 보기", value=True, key="only_remaining",
+                                 help="끄면 처리한 오류(자동 수정됨·행 제외됨·중복 해소)도 함께 보여줍니다.")
+    chosen = f2.multiselect("오류 종류로 거르기", options=list(KINDS), default=present, key="kind_filter",
                             placeholder="오류 종류를 고르세요")
-    df = issues_frame(result, applied)
+    df = issues_frame(result, res)
     shown = df[df["오류 종류"].isin(chosen)]
-    st.caption(f"{len(shown):,}건 표시 (전체 {len(df):,}건)")
+    if only_remaining:
+        shown = shown[shown[ACTION_COL] == ""]
+    st.caption(f"{len(shown):,}건 표시 (전체 {len(df):,}건 중 남은 오류 {remaining:,}건)")
     st.dataframe(shown, hide_index=True, width="stretch")
 
 

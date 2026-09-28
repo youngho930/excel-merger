@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .matching import MatchResult, match_columns
 from .reader import ReadError, SourceTable, read_table
@@ -58,6 +58,33 @@ class MergedRow:
     dup_group: str | None = None
 
 
+# "처리" 열에 적는 말 (오류목록)
+AUTO_FIXED = "자동 수정됨"
+EXCLUDED = "행 제외됨"
+DUP_RESOLVED = "중복 해소(이 행을 남김)"
+
+
+@dataclass
+class Resolution:
+    """MergeResult.resolve()의 결과: 사용자가 처리한 내용."""
+    excluded: frozenset                  # 뺀 행 (파일, 원래 행)
+    apply_suggestions: bool
+    fixes: dict                          # (파일, 행, 기준명) -> 결과 파일에 넣을 제안값 (뺀 행 제외)
+    actions: list[str]                   # result.issues와 같은 순서. 처리 안 한 오류는 ""
+    resolved_rows: frozenset             # 중복이 풀려 파란 색을 빼는 행 (파일, 원래 행)
+    fully_excluded_groups: list[str]     # 행이 모두 빠진 중복 그룹
+    kinds: list[str]                     # result.issues의 오류 종류 (counts 계산용)
+
+    def counts(self) -> dict[str, tuple[int, int, int]]:
+        """오류 종류 -> (전체, 처리됨, 남은 오류)."""
+        total, done = Counter(self.kinds), Counter(k for k, a in zip(self.kinds, self.actions) if a)
+        return {k: (total[k], done[k], total[k] - done[k]) for k in KINDS}
+
+    def totals(self) -> tuple[int, int, int]:
+        done = sum(1 for a in self.actions if a)
+        return len(self.actions), done, len(self.actions) - done
+
+
 @dataclass
 class MergeResult:
     scenario: Scenario
@@ -76,6 +103,46 @@ class MergeResult:
         """
         return {(i.file, i.row, i.standard): i.suggestion for i in self.issues
                 if i.suggestion is not None and i.row is not None and i.kind != DUPLICATE}
+
+    def dup_groups(self) -> dict[str, list[MergedRow]]:
+        """중복 그룹 이름 -> 그 그룹의 행들 (취합 순서)."""
+        groups: dict[str, list[MergedRow]] = {}
+        for r in self.rows:
+            if r.dup_group:
+                groups.setdefault(r.dup_group, []).append(r)
+        return groups
+
+    def resolve(self, excluded: Iterable[tuple[str, int]] = (),
+                apply_suggestions: bool = False) -> "Resolution":
+        """사용자의 처리(행 제외, 제안값 적용)를 반영한 결과를 계산한다. 원래 결과는 바꾸지 않는다.
+
+        excluded: 취합결과에서 뺄 행 (파일 이름, 원래 행 번호)
+        """
+        excluded = frozenset((f, int(r)) for f, r in excluded)
+        groups = self.dup_groups()
+        kept_count = {g: sum(1 for r in rows if (r.source_file, r.excel_row) not in excluded)
+                      for g, rows in groups.items()}
+        resolved_rows = frozenset((r.source_file, r.excel_row) for g, rows in groups.items()
+                                  if kept_count[g] == 1 for r in rows
+                                  if (r.source_file, r.excel_row) not in excluded)
+        fully_excluded = [g for g, n in kept_count.items() if n == 0]
+        fixes = {k: v for k, v in self.suggestion_map().items()
+                 if (k[0], k[1]) not in excluded} if apply_suggestions else {}
+
+        actions = []
+        for i in self.issues:
+            pos = (i.file, i.row)
+            if i.row is not None and pos in excluded:
+                actions.append(EXCLUDED)
+            elif i.kind != DUPLICATE and (i.file, i.row, i.standard) in fixes:
+                actions.append(AUTO_FIXED)
+            elif i.kind == DUPLICATE and pos in resolved_rows:
+                actions.append(DUP_RESOLVED)
+            else:
+                actions.append("")
+        return Resolution(excluded=excluded, apply_suggestions=apply_suggestions, fixes=fixes,
+                          actions=actions, resolved_rows=resolved_rows, fully_excluded_groups=fully_excluded,
+                          kinds=[i.kind for i in self.issues])
 
     def to_dataframe(self, escape_formulas: bool = False):
         """화면 표시용 표. CSV로 내보낼 때는 escape_formulas=True로 수식 주입을 막는다."""
@@ -195,4 +262,5 @@ def _find_duplicates(scenario: Scenario, candidates: list[tuple[MergedRow, tuple
     return issues
 
 
-__all__ = ["FilePlan", "MergedRow", "MergeResult", "prepare", "pre_run_warnings", "execute"]
+__all__ = ["AUTO_FIXED", "DUP_RESOLVED", "EXCLUDED", "FilePlan", "MergedRow", "MergeResult", "Resolution",
+           "prepare", "pre_run_warnings", "execute"]
