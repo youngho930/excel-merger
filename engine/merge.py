@@ -13,12 +13,21 @@ from pathlib import Path
 from typing import Any
 
 from .matching import MatchResult, match_columns
-from .reader import SourceTable, read_table
+from .reader import ReadError, SourceTable, read_table
 from .scenario import Scenario
 from .validate import (DUPLICATE, KINDS, REQUIRED, WHOLE_ROW, Issue, dup_key_part,
                        dup_key_text, validate_cell)
 
 MAX_DUP_REFS = 5   # 중복 설명에 적는 상대 행 최대 개수
+MAX_FILES = 50     # 한 번에 취합할 수 있는 최대 파일 수
+FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def escape_formula(value: Any) -> Any:
+    """CSV·표 내보내기용: 수식으로 해석될 수 있는 문자열 앞에 '를 붙인다 (보안 검토 8번)."""
+    if isinstance(value, str) and value.startswith(FORMULA_PREFIXES):
+        return "'" + value
+    return value
 
 
 @dataclass
@@ -60,13 +69,15 @@ class MergeResult:
         c = Counter(i.kind for i in self.issues)
         return {k: c.get(k, 0) for k in KINDS}
 
-    def to_dataframe(self):
+    def to_dataframe(self, escape_formulas: bool = False):
+        """화면 표시용 표. CSV로 내보낼 때는 escape_formulas=True로 수식 주입을 막는다."""
         import pandas as pd
         cols = ["출처 파일", "원래 행"] + self.scenario.column_names
+        esc = escape_formula if escape_formulas else (lambda v: v)
         data = []
         for r in self.rows:
-            data.append([r.source_file, r.excel_row] +
-                        [r.raw[c] if c in r.errors else r.values[c] for c in self.scenario.column_names])
+            data.append([esc(r.source_file), r.excel_row] +
+                        [esc(r.raw[c] if c in r.errors else r.values[c]) for c in self.scenario.column_names])
         return pd.DataFrame(data, columns=cols)
 
 
@@ -74,6 +85,8 @@ def prepare(scenario: Scenario, paths: list[str | Path],
             header_rows: dict[str, int] | None = None) -> list[FilePlan]:
     """파일들을 읽고 열을 매칭한다. 파일 순서는 주어진 순서를 그대로 쓴다."""
     header_rows = header_rows or {}
+    if len(paths) > MAX_FILES:
+        raise ReadError(f"한 번에 취합할 수 있는 파일은 최대 {MAX_FILES}개입니다.")
     plans = []
     for p in paths:
         p = Path(p)
@@ -158,12 +171,16 @@ def _find_duplicates(scenario: Scenario, candidates: list[tuple[MergedRow, tuple
         n += 1
         group = f"중복-{n}"
         text = dup_key_text(scenario.dup_keys, list(key))
+        # 설명에는 상대 행을 앞에서부터 최대 MAX_DUP_REFS개만 적는다.
+        # 그룹 전체를 행마다 다시 훑지 않도록 앞쪽 몇 개만 잘라 둔다 (보안 검토 3번: O(k²) 방지)
+        head = members[:MAX_DUP_REFS + 1]
         for row in members:
             row.dup_group = group
-            others = [o for o in members if o is not row]
-            refs = ", ".join(f"{o.source_file} {o.excel_row}행" for o in others[:MAX_DUP_REFS])
-            if len(others) > MAX_DUP_REFS:
-                refs += f" 외 {len(others) - MAX_DUP_REFS}행"
+            shown = [o for o in head if o is not row][:MAX_DUP_REFS]
+            refs = ", ".join(f"{o.source_file} {o.excel_row}행" for o in shown)
+            rest = len(members) - 1 - len(shown)
+            if rest > 0:
+                refs += f" 외 {rest}행"
             issues.append(Issue(file=row.source_file, row=row.excel_row, column=WHOLE_ROW,
                                 standard=label, kind=DUPLICATE, value=text,
                                 message=f"{refs}과 중복기준({short}) 값이 같음", dup_group=group))

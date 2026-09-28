@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,9 @@ TOP_KEYS = {K_NAME, K_DESC, K_COLUMNS, K_DUP}
 COLUMN_KEYS = {K_STD, K_ALIASES, K_REQUIRED, K_FORMAT, K_RANGE, K_ALLOWED}
 
 MAX_YAML_BYTES = 256 * 1024
+MAX_COLUMNS = 100
+MAX_ALIASES = 50
+MAX_ALLOWED = 200
 SCENARIO_KEY_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
@@ -68,6 +72,17 @@ def _is_number(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _check_scalars(items: list, where: str) -> None:
+    """목록 안에 목록·딕셔너리가 있으면 거부한다.
+
+    YAML 앵커(&a)·별칭(*a)으로 중첩 목록을 만들면 문자열로 펼칠 때 크기가
+    지수적으로 커진다 (479바이트 → 913MB, 보안 검토 6번).
+    """
+    for item in items:
+        if not (item is None or isinstance(item, (str, int, float, bool, date))):
+            raise ScenarioError(f"{where}에는 글자·숫자·날짜 값만 적을 수 있습니다 (목록 안에 목록 불가).")
+
+
 def _parse_column(i: int, raw: Any, where: str) -> ColumnSpec:
     pos = f"{where}의 columns {i}번째 항목"
     if not isinstance(raw, dict):
@@ -93,6 +108,9 @@ def _parse_column(i: int, raw: Any, where: str) -> ColumnSpec:
     aliases_raw = raw.get(K_ALIASES) or []
     if not isinstance(aliases_raw, list):
         raise ScenarioError(f"{pos}의 '{K_ALIASES}'은 [이름1, 이름2] 목록으로 적어 주세요.")
+    if len(aliases_raw) > MAX_ALIASES:
+        raise ScenarioError(f"{pos}의 '{K_ALIASES}'이 너무 많습니다 (최대 {MAX_ALIASES}개).")
+    _check_scalars(aliases_raw, f"{pos}의 '{K_ALIASES}'")
     aliases = tuple(str(a).strip() for a in aliases_raw if a is not None and str(a).strip())
 
     required = raw.get(K_REQUIRED, False)
@@ -114,6 +132,9 @@ def _parse_column(i: int, raw: Any, where: str) -> ColumnSpec:
     if allowed_raw is not None:
         if not isinstance(allowed_raw, list) or not allowed_raw:
             raise ScenarioError(f"{pos}의 '{K_ALLOWED}'은 [값1, 값2] 목록으로 적어 주세요.")
+        if len(allowed_raw) > MAX_ALLOWED:
+            raise ScenarioError(f"{pos}의 '{K_ALLOWED}'이 너무 많습니다 (최대 {MAX_ALLOWED}개).")
+        _check_scalars(allowed_raw, f"{pos}의 '{K_ALLOWED}'")
         norm = []
         for a in allowed_raw:
             p = parse_value(a, fmt) if a is not None else None
@@ -144,6 +165,8 @@ def parse_scenario(data: Any, key: str, where: str = "시나리오 파일") -> S
     cols_raw = data[K_COLUMNS]
     if not isinstance(cols_raw, list) or not cols_raw:
         raise ScenarioError(f"{where}의 '{K_COLUMNS}'에 열이 하나도 없습니다.")
+    if len(cols_raw) > MAX_COLUMNS:
+        raise ScenarioError(f"{where}의 열이 너무 많습니다 (최대 {MAX_COLUMNS}개).")
 
     columns = [_parse_column(i, c, where) for i, c in enumerate(cols_raw, start=1)]
 
@@ -207,7 +230,7 @@ def load_scenario(path: str | Path) -> Scenario:
 
 def find_scenario(key: str, scenarios_dir: str | Path) -> Scenario:
     """scenarios/ 폴더에서 이름(확장자 제외)으로 시나리오를 찾는다."""
-    if not SCENARIO_KEY_RE.match(key):
+    if not SCENARIO_KEY_RE.fullmatch(key):   # match()+$는 끝의 줄바꿈을 통과시킨다
         raise ScenarioError(f"시나리오 이름 '{key}'에는 영문·숫자·_·- 만 쓸 수 있습니다.")
     return load_scenario(Path(scenarios_dir) / f"{key}.yaml")
 

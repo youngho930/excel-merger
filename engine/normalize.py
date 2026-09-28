@@ -147,9 +147,11 @@ def parse_real(raw: Any) -> Parsed:
 
 
 # ---------------------------------------------------------------- 날짜
-_TIME = r"(?:[ T]+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?"
+# 시간 부분: 앞의 공백과 겹치는 수량자를 두지 않는다 (ReDoS 방지, 보안 검토 2번)
+_TIME = r"(?:(?:\s+|\s*T\s*)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?"
 _YMD_SEP = re.compile(
-    r"^(?P<y>\d{4})\s*(?P<sep>[-./])\s*(?P<m>\d{1,2})\s*(?P=sep)\s*(?P<d>\d{1,2})\s*\.?" + _TIME + r"$")
+    r"^(?P<y>\d{4})\s*(?P<sep>[-./])\s*(?P<m>\d{1,2})\s*(?P=sep)\s*(?P<d>\d{1,2})\.?" + _TIME + r"$")
+MAX_DATE_TEXT = 40   # 이보다 긴 문자는 날짜로 보지 않는다 (정규식에 넣지 않음)
 _YMD_KO = re.compile(r"^(?P<y>\d{4})\s*년\s*(?P<m>\d{1,2})\s*월\s*(?P<d>\d{1,2})\s*일$")
 _YMD_COMPACT = re.compile(r"^(?P<y>\d{4})(?P<m>\d{2})(?P<d>\d{2})$")
 _YM_SEP = re.compile(r"^(?P<y>\d{4})\s*[-./]\s*(?P<m>\d{1,2})\s*\.?$")
@@ -201,6 +203,8 @@ def parse_date(raw: Any) -> Parsed:
                           suggestion=guess)
         return Parsed(False, reason=f"날짜 칸에 숫자({format_number(raw)})가 있음")
     s = str(raw).strip()
+    if len(s) > MAX_DATE_TEXT:
+        return Parsed(False, reason="날짜로 읽을 수 없는 표기")
     for pat in _DAY_PATTERNS:
         m = pat.match(s)
         if m:

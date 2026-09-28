@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import posixpath
 import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,10 +20,21 @@ from .normalize import is_blank, normalize_header
 from .scenario import Scenario
 
 HEADER_SCAN_ROWS = 20           # 머리글을 찾을 때 위에서부터 훑는 행 수
-MAX_FILE_BYTES = 20 * 1024 * 1024
-MAX_ROWS = 100_000              # 파일 하나에서 읽는 최대 행 수
-MAX_COLS = 200
 EXCEL_SUFFIXES = (".xlsx", ".xlsm")
+
+# 자원 한도: 업로드된 파일 하나가 메모리·CPU를 독차지하지 못하게 한다 (보안 검토 1번)
+MAX_FILE_BYTES = 20 * 1024 * 1024          # 압축된 파일 크기
+MAX_UNZIPPED_BYTES = 100 * 1024 * 1024     # 압축을 푼 전체 크기
+MAX_SHARED_STRINGS_BYTES = 30 * 1024 * 1024
+MAX_ZIP_ENTRIES = 1000
+MAX_COMPRESSION_RATIO = 500                # 1MB 넘는 항목의 압축률 상한 (0으로 채운 압축 폭탄은 약 1000배, 반복이 많은 정상 데이터는 약 230배)
+MAX_SHEETS = 20
+MAX_ROWS = 50_000                          # 파일 하나에서 읽는 데이터 최대 행 수
+MAX_COLS = 200
+MAX_CELLS = 1_000_000                      # 파일 하나에서 읽는 최대 칸 수 (행 × 열)
+MAX_SHEET_XML_BYTES = 60 * 1024 * 1024     # 모든 시트가 가리키는 시트 XML 크기의 합
+
+_NS_MAIN = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
 
 class ReadError(Exception):
@@ -86,6 +99,73 @@ def detect_header_row(rows: list[tuple[Any, ...]], scenario: Scenario) -> Header
     return HeaderGuess(fallback + 1, max(best_score, 0), False)
 
 
+def _check_zip(path: Path) -> None:
+    """openpyxl로 열기 전에 압축을 푼 크기를 검사한다 (작은 파일이 풀리면서 커지는 압축 폭탄 방지)."""
+    too_big = f"'{path.name}'은 압축을 풀면 너무 커서 처리할 수 없습니다."
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+    except (zipfile.BadZipFile, OSError, ValueError):
+        raise ReadError(f"'{path.name}'을 엑셀 파일로 열 수 없습니다. 파일이 손상되었거나 암호가 걸려 있을 수 있습니다.") from None
+    if len(infos) > MAX_ZIP_ENTRIES:
+        raise ReadError(too_big)
+    total = 0
+    for info in infos:
+        total += info.file_size
+        if total > MAX_UNZIPPED_BYTES:
+            raise ReadError(too_big)
+        if info.file_size > 1024 * 1024 and info.file_size > MAX_COMPRESSION_RATIO * max(info.compress_size, 1):
+            raise ReadError(too_big)
+        if info.filename.lower().endswith("sharedstrings.xml") and info.file_size > MAX_SHARED_STRINGS_BYTES:
+            raise ReadError(too_big)
+
+    # openpyxl은 파일을 열 때 시트마다 시트 XML을 훑는다 (크기 정보가 없으면 끝까지).
+    # 여러 시트가 같은 XML을 가리키면 같은 내용을 여러 번 읽으므로, 시트가 가리키는 XML 크기의
+    # 합에 상한을 둔다 (60MB 시트 하나를 시트 4개가 공유하면 여는 데만 50초 걸렸음).
+    sizes = {i.filename: i.file_size for i in infos}
+    try:
+        with zipfile.ZipFile(path) as zf:
+            targets = _sheet_targets(zf, sizes)
+    except ReadError:
+        raise
+    except Exception:
+        targets = None   # 구조를 알 수 없으면 openpyxl이 열 때 판단하게 둔다
+    if targets is not None:
+        if len(targets) > MAX_SHEETS:
+            raise ReadError(f"'{path.name}'에 시트가 너무 많습니다 (최대 {MAX_SHEETS}개).")
+        if sum(sizes.get(t, 0) for t in targets) > MAX_SHEET_XML_BYTES:
+            raise ReadError(too_big)
+
+
+_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_DOC_REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+MAX_META_XML_BYTES = 1024 * 1024   # workbook.xml·관계 파일은 작다. 크면 거부
+
+
+def _read_small_xml(zf: zipfile.ZipFile, name: str, sizes: dict[str, int]):
+    if sizes.get(name, 0) > MAX_META_XML_BYTES:
+        raise ReadError("엑셀 파일 구조 정보가 비정상적으로 큽니다.")
+    return ET.fromstring(zf.read(name))
+
+
+def _resolve(base_dir: str, target: str) -> str:
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(base_dir, target))
+
+
+def _sheet_targets(zf: zipfile.ZipFile, sizes: dict[str, int]) -> list[str]:
+    """workbook.xml의 시트 목록을 시트 XML 경로 목록으로 바꾼다 (시트마다 1개, 중복 포함)."""
+    root_rels = _read_small_xml(zf, "_rels/.rels", sizes)
+    wb_path = next(_resolve("", r.get("Target", "")) for r in root_rels.iter(_REL_NS + "Relationship")
+                   if r.get("Type", "").endswith("/officeDocument"))
+    wb_dir = posixpath.dirname(wb_path)
+    rels = _read_small_xml(zf, posixpath.join(wb_dir, "_rels", posixpath.basename(wb_path) + ".rels"), sizes)
+    by_id = {r.get("Id"): _resolve(wb_dir, r.get("Target", "")) for r in rels.iter(_REL_NS + "Relationship")}
+    wb = _read_small_xml(zf, wb_path, sizes)
+    return [by_id.get(s.get(_DOC_REL_NS + "id"), "") for s in wb.iter(_NS_MAIN + "sheet")]
+
+
 def _open_workbook(path: Path):
     if path.suffix.lower() not in EXCEL_SUFFIXES:
         raise ReadError(f"'{path.name}'은 엑셀(.xlsx) 파일이 아닙니다. .xls 파일은 엑셀에서 .xlsx로 다시 저장해 주세요.")
@@ -93,6 +173,7 @@ def _open_workbook(path: Path):
         raise ReadError(f"'{path.name}' 파일을 찾을 수 없습니다.")
     if path.stat().st_size > MAX_FILE_BYTES:
         raise ReadError(f"'{path.name}'이 너무 큽니다 (최대 {MAX_FILE_BYTES // (1024 * 1024)}MB).")
+    _check_zip(path)
     try:
         # read_only: 원본을 수정할 수 없고 메모리도 적게 쓴다. data_only: 수식 대신 저장된 계산값.
         return load_workbook(path, read_only=True, data_only=True)
@@ -102,29 +183,74 @@ def _open_workbook(path: Path):
         raise ReadError(f"'{path.name}'을 엑셀 파일로 열 수 없습니다.") from None
 
 
-def _sheet_rows(ws) -> list[tuple[Any, ...]]:
-    """시트의 모든 행 값을 1행부터 빈 행 포함, 순서대로 읽는다."""
-    ws.reset_dimensions()  # 파일에 적힌 크기 정보를 믿지 않고 실제 셀을 읽는다
-    rows: list[tuple[Any, ...]] = []
-    for row in ws.iter_rows():
-        cells = [c for c in row if getattr(c, "row", None) is not None]
-        if not cells:
-            continue
-        r = cells[0].row
-        if r > MAX_ROWS + HEADER_SCAN_ROWS:
-            raise ReadError(f"'{ws.title}' 시트의 행이 너무 많습니다 (최대 {MAX_ROWS:,}행).")
-        while len(rows) < r - 1:
-            rows.append(())
-        values: dict[int, Any] = {}
-        for c in cells:
-            if c.column > MAX_COLS:
-                if c.value is not None:
-                    raise ReadError(f"'{ws.title}' 시트의 열이 너무 많습니다 (최대 {MAX_COLS}열).")
-                continue
-            values[c.column] = c.value
-        width = max(values) if values else 0
-        rows.append(tuple(values.get(i) for i in range(1, width + 1)))
+def _blank_row(row) -> bool:
+    return all(is_blank(v) for v in row)
+
+
+def _trim(row) -> tuple[Any, ...]:
+    """뒤쪽 빈칸을 잘라낸 행."""
+    row = tuple(row)
+    end = len(row)
+    while end and is_blank(row[end - 1]):
+        end -= 1
+    return row[:end]
+
+
+def _scan_top(ws) -> list[tuple[Any, ...]]:
+    """머리글 탐지용으로 위쪽 HEADER_SCAN_ROWS 행만 읽는다.
+
+    max_row·max_col을 주면 openpyxl이 그 밖의 행·열을 만들지 않는다
+    (파일에 적힌 행 번호가 10억이어도 바로 멈춘다).
+    """
+    ws.reset_dimensions()  # 파일에 적힌 크기 정보를 믿지 않는다
+    rows = [_trim(r) for r in ws.iter_rows(max_row=HEADER_SCAN_ROWS, max_col=MAX_COLS + 1, values_only=True)]
+    if any(len(r) > MAX_COLS for r in rows):
+        raise ReadError(f"'{ws.title}' 시트의 열이 너무 많습니다 (최대 {MAX_COLS}열).")
     return rows
+
+
+def _has_data_after(path: Path, ws, last_row: int) -> bool:
+    """last_row보다 아래에 값이 있는 칸이 하나라도 있는지 시트 XML을 훑어 확인한다.
+
+    iter_rows(max_row=…)는 한도 밖의 행을 조용히 건너뛰므로, 한도를 넘는 데이터가
+    말없이 빠지지 않도록 따로 확인한다. 빈 행을 만들어 내지 않으므로 행 번호가
+    아무리 멀리 떨어져 있어도 빠르다. (시트 XML 경로는 openpyxl read-only 시트의 내부 속성)
+    """
+    member = getattr(ws, "_worksheet_path", None)
+    if not member:
+        return False
+    row_no = 0
+    with zipfile.ZipFile(path) as zf, zf.open(member.lstrip("/")) as src:
+        for _, el in ET.iterparse(src, events=("end",)):
+            if el.tag != _NS_MAIN + "row":
+                continue
+            r = el.get("r")
+            row_no = int(r) if r and r.isdigit() else row_no + 1
+            if row_no > last_row and any(
+                    c.find(_NS_MAIN + "v") is not None or c.find(_NS_MAIN + "is") is not None
+                    for c in el.iter(_NS_MAIN + "c")):
+                return True
+            el.clear()
+    return False
+
+
+def _read_data(ws, header_row: int, width: int, path: Path) -> list[SourceRow]:
+    """머리글 다음 행부터 읽는다. 열은 width까지만, 행·칸 수는 한도까지만."""
+    width = max(width, 1)
+    last_allowed = header_row + MAX_ROWS
+    if MAX_ROWS * width > MAX_CELLS:
+        last_allowed = header_row + MAX_CELLS // width
+    out: list[SourceRow] = []
+    for offset, row in enumerate(ws.iter_rows(min_row=header_row + 1, max_row=last_allowed,
+                                              max_col=width, values_only=True)):
+        if _blank_row(row):
+            continue  # 완전히 빈 행은 건너뛴다
+        out.append(SourceRow(excel_row=header_row + 1 + offset,
+                             cells=tuple(row) + (None,) * (width - len(row))))
+    if _has_data_after(path, ws, last_allowed):
+        limit = min(MAX_ROWS, MAX_CELLS // width)
+        raise ReadError(f"'{ws.title}' 시트의 데이터가 너무 많습니다 (열 {width}개 기준 최대 {limit:,}행).")
+    return out
 
 
 def read_table(path: str | Path, scenario: Scenario, header_row: int | None = None,
@@ -133,50 +259,50 @@ def read_table(path: str | Path, scenario: Scenario, header_row: int | None = No
 
     header_row를 주면 그 행을 머리글로 쓰고, 없으면 자동으로 찾는다.
     sheet를 주지 않으면 머리글 점수가 가장 높은 시트를 쓴다(동점이면 앞 시트).
+    머리글 탐지는 시트마다 위쪽 몇 행만 읽고, 고른 시트 하나만 끝까지 읽는다.
     """
     path = Path(path)
     wb = _open_workbook(path)
     try:
-        candidates = []
+        if len(wb.sheetnames) > MAX_SHEETS:
+            raise ReadError(f"'{path.name}'에 시트가 너무 많습니다 (최대 {MAX_SHEETS}개).")
         names = [sheet] if sheet else wb.sheetnames
+        best = None
         for name in names:
             if name not in wb.sheetnames:
                 raise ReadError(f"'{path.name}'에 '{name}' 시트가 없습니다.")
-            rows = _sheet_rows(wb[name])
-            guess = detect_header_row(rows, scenario)
-            candidates.append((guess, name, rows))
+            top = _scan_top(wb[name])
+            guess = detect_header_row(top, scenario)
+            if best is None or (guess.confident, guess.score) > (best[0].confident, best[0].score):
+                best = (guess, name, top)
+        guess, sheet_name, top = best
+        ws = wb[sheet_name]
+
+        if header_row is not None:
+            if header_row < 1 or header_row > HEADER_SCAN_ROWS:
+                raise ReadError(f"머리글 행은 1~{HEADER_SCAN_ROWS}행 중에서 지정해 주세요.")
+            hr, confidence = header_row, "지정"
+        else:
+            hr, confidence = guess.row, ("높음" if guess.confident else "낮음")
+
+        # 열 너비: 위쪽에서 본 가장 넓은 행 기준 (그보다 오른쪽 칸은 머리글이 없어 읽지 않는다)
+        width = max((len(r) for r in top), default=0)
+        rows = _read_data(ws, hr, width, path)
+    except ReadError:
+        raise
+    except Exception:
+        # read_only 모드는 시트를 읽을 때 비로소 XML을 해석한다. 손상된 파일의 내부 예외를
+        # 그대로 내보내지 않는다 (내부 경로·스택 노출 방지, 보안 검토 5번)
+        raise ReadError(f"'{path.name}'의 시트 내용을 읽을 수 없습니다. 파일이 손상되었을 수 있습니다.") from None
     finally:
         wb.close()
 
-    best = candidates[0]
-    for c in candidates[1:]:
-        if (c[0].confident, c[0].score) > (best[0].confident, best[0].score):
-            best = c
-    guess, sheet_name, rows = best
-
-    if header_row is not None:
-        if header_row < 1 or header_row > max(len(rows), 1):
-            raise ReadError(f"'{path.name}'에 {header_row}행이 없습니다.")
-        hr, confidence = header_row, "지정"
-    else:
-        hr, confidence = guess.row, ("높음" if guess.confident else "낮음")
-
-    data_rows = rows[hr:] if rows else []
-    header_vals = list(rows[hr - 1]) if rows else []
-    width = max([len(header_vals)] + [len(r) for r in data_rows]) if (header_vals or data_rows) else 0
+    header_vals = list(top[hr - 1]) if hr - 1 < len(top) else []
     raw_headers = header_vals + [None] * (width - len(header_vals))
     headers = [
         str(v).strip() if not is_blank(v) else f"(빈 머리글 {get_column_letter(i + 1)}열)"
         for i, v in enumerate(raw_headers)
     ]
-
-    table_rows = []
-    for offset, r in enumerate(data_rows):
-        if all(is_blank(v) for v in r):
-            continue  # 완전히 빈 행은 건너뛴다
-        cells = tuple(r) + (None,) * (width - len(r))
-        table_rows.append(SourceRow(excel_row=hr + 1 + offset, cells=cells))
-
     return SourceTable(file_name=path.name, path=path, sheet_name=sheet_name, header_row=hr,
-                       headers=headers, raw_headers=raw_headers, rows=table_rows,
+                       headers=headers, raw_headers=raw_headers, rows=rows,
                        header_confidence=confidence)

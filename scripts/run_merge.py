@@ -59,6 +59,11 @@ def main(argv: list[str] | None = None) -> int:
     except (ScenarioError, ReadError) as e:
         print(f"오류: {e}", file=sys.stderr)
         return 2
+    except Exception:
+        # 예상하지 못한 오류도 내부 경로·스택 없이 안내만 한다 (보안 검토 5번)
+        print("오류: 파일을 처리하는 중 예상하지 못한 문제가 생겼습니다. 파일이 손상되지 않았는지 확인해 주세요.",
+              file=sys.stderr)
+        return 1
 
     print(f"시나리오: {scenario.name} ({scenario.key})")
     print(f"파일 {len(plans)}개\n")
@@ -81,8 +86,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"   - {w}")
         print("   경고가 있지만 그대로 진행합니다.\n")
 
-    result = execute(scenario, plans)
-    out = write_result(result, args.out)
+    try:
+        result = execute(scenario, plans)
+        out = write_result(result, args.out)
+    except Exception:
+        print("오류: 결과를 만드는 중 예상하지 못한 문제가 생겼습니다.", file=sys.stderr)
+        return 1
 
     counts = result.counts()
     print(f"취합 행 수: {len(result.rows)}")
