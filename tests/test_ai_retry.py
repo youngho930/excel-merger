@@ -101,12 +101,81 @@ def test_retries_count_against_app_wide_budget(sleeps):
     (ApiError(401), ai_match.AiError, "AI 키가 올바르지 않거나"),
     (ApiError(400, "API key not valid"), ai_match.AiError, "AI 키가 올바르지 않거나"),
     (ApiError(404), ai_match.AiError, "AI 모델 이름을 찾을 수 없습니다"),
-    (RuntimeError("socket"), ai_match.AiError, "네트워크 연결을 확인해 주세요"),
+    (ConnectionError("socket"), ai_match.AiError, "네트워크 연결을 확인해 주세요"),
+    (type("ConnectError", (Exception,), {})("socket"), ai_match.AiError, "네트워크 연결을 확인해 주세요"),
+    (ModuleNotFoundError("No module named 'google'"), ai_match.AiSetupError, "구성 요소가 설치되지 않았습니다"),
+    (UnicodeEncodeError("ascii", "키“", 1, 2, "bad"), ai_match.AiSetupError, "AI 키 형식이 올바르지 않습니다"),
+    (TypeError("socket"), ai_match.AiError, "예상하지 못한 오류"),
 ])
 def test_errors_are_explained_by_cause(error, kind, text):
     err = ai_match.explain_failure(error)
     assert type(err) is kind and text in str(err)
     assert "secret-detail" not in str(err) and "socket" not in str(err)
+
+
+def test_install_problem_is_not_network_and_not_counted(monkeypatch, sleeps):
+    # 예전: ImportError 도 "네트워크 연결을 확인해 주세요"로 나오고 세션 횟수가 깎였다
+    monkeypatch.setenv(ai_match.KEY_NAME, "test-key")
+
+    def missing(*a):
+        raise ModuleNotFoundError("No module named 'google'")
+    monkeypatch.setattr(ai_match, "call_gemini", missing)
+    at = open_demo()
+    at.button(key="ai_btn").click().run()
+    msg = texts(at.warning)
+    assert "AI 기능 구성 요소가 설치되지 않았습니다" in msg and NOTICE in msg and "네트워크" not in msg
+    assert "남은 AI 호출: 5/5회" in texts(at.caption)
+    assert sleeps == []                                     # 설치 문제는 재시도하지 않는다
+
+
+@pytest.mark.parametrize("bad_key", ["“AIzaSyExample”", "AIza SyExample", "AIza키Example", "AIzaExample\n"])
+def test_bad_key_format_is_caught_before_calling(bad_key, sleeps):
+    sc, plans = demo_plans()
+    fake = Scripted("ok")
+    with pytest.raises(ai_match.AiSetupError, match="AI 키 형식이 올바르지 않습니다"):
+        ai_match.recommend(sc, plans, api_key=bad_key, caller=fake, budget=ai_match.CallBudget())
+    assert fake.calls == 0
+
+
+class Captured:
+    def __init__(self):
+        import logging
+        self.records = []
+        self.handler = logging.Handler()
+        self.handler.emit = lambda r: self.records.append(r.getMessage())
+
+    def __enter__(self):
+        ai_match.log.addHandler(self.handler)
+        return self.records
+
+    def __exit__(self, *exc):
+        ai_match.log.removeHandler(self.handler)
+
+
+def test_failures_are_logged_with_key_masked(sleeps):
+    sc, plans = demo_plans()
+    key = "AIzaSyTESTKEY0123456789abcdefghijkl"
+    leaky = ApiError(503, f"quota for key {key} url https://x/?key={key}")
+    with Captured() as logs, pytest.raises(ai_match.AiBusy) as e:
+        ai_match.recommend(sc, plans, api_key=key, caller=Scripted(leaky), budget=ai_match.CallBudget())
+    assert len(logs) == 3                                    # 시도마다 한 줄
+    assert all("ApiError" in line and "503" in line for line in logs)
+    assert all(key not in line and "***" in line for line in logs)
+    assert key not in str(e.value) and "503" not in str(e.value)   # 화면 문구에는 원본 메시지 없음
+
+
+def test_success_after_retry_is_logged(sleeps):
+    sc, plans = demo_plans()
+    with Captured() as logs:
+        ai_match.recommend(sc, plans, api_key="k", caller=Scripted(ApiError(503), "ok"),
+                           budget=ai_match.CallBudget())
+    assert any("실패 (시도 1/3)" in line for line in logs) and any("성공 (시도 2/3" in line for line in logs)
+
+
+def test_redact_masks_key_shapes():
+    assert ai_match.redact("x AIzaSyABCDEFGHIJKLMNOP y") == "x *** y"
+    assert ai_match.redact("https://h/v1?key=abc123&x=1") == "https://h/v1?key=***&x=1"
+    assert ai_match.redact("plain-secret here", "plain-secret") == "*** here"
 
 
 def test_non_transient_error_is_not_retried(sleeps):

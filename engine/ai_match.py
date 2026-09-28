@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import logging
 import os
+import re
+import socket
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -81,8 +84,40 @@ def _status_code(e: BaseException) -> int | None:
     return None
 
 
+class AiSetupError(AiNotSent):
+    """AI 기능을 쓸 준비가 안 된 경우 (구성 요소 미설치, 키 형식 오류). Google 에 닿지 않았으므로 세션 횟수에 넣지 않는다."""
+
+
+NOT_INSTALLED = ("AI 기능 구성 요소가 설치되지 않았습니다. "
+                 "관리자에게 requirements.txt 의 google-genai 설치를 확인해 달라고 요청해 주세요.")
+BAD_KEY_FORMAT = ("AI 키 형식이 올바르지 않습니다. 관리자가 GEMINI_API_KEY 에 따옴표·공백·한글 같은 "
+                  "다른 문자가 섞였는지 확인해야 합니다.")
+NETWORK = "AI를 호출하지 못했습니다. 네트워크 연결을 확인해 주세요."
+UNEXPECTED = "AI를 호출하지 못했습니다(예상하지 못한 오류). 관리자가 서버 로그를 확인해야 합니다."
+
+# httpx·requests 등 HTTP 라이브러리의 연결·전송 오류 이름 (라이브러리를 불러오지 않고 이름으로 판단)
+_NETWORK_ERROR_NAMES = {"ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout",
+                        "TimeoutException", "NetworkError", "TransportError", "RemoteProtocolError",
+                        "ProxyError", "ReadError", "WriteError", "ConnectionError", "SSLError"}
+_KEY_CHARS = re.compile(r"[A-Za-z0-9_\-.]+")
+
+
+def _is_network_error(e: BaseException) -> bool:
+    if isinstance(e, (ConnectionError, TimeoutError, socket.gaierror)):
+        return True
+    return any(cls.__name__ in _NETWORK_ERROR_NAMES for cls in type(e).__mro__)
+
+
 def explain_failure(e: BaseException) -> AiError:
-    """호출 예외를 원인별 한국어 오류로 바꾼다. 원래 메시지(키·주소가 섞일 수 있음)는 화면에 내보내지 않는다."""
+    """호출 예외를 원인별 한국어 오류로 바꾼다. 원래 메시지(키·주소가 섞일 수 있음)는 화면에 내보내지 않는다.
+
+    HTTP 상태 코드가 있으면 코드로, 없으면 예외 종류로 나눈다. 예전에는 코드가 없는 예외를 모두
+    "네트워크"로 분류해서 설치 문제·키 형식 문제도 네트워크처럼 보였다.
+    """
+    if isinstance(e, ImportError):
+        return AiSetupError(NOT_INSTALLED)
+    if isinstance(e, UnicodeError):          # 키에 한글·스마트 따옴표 등이 있어 HTTP 헤더에 넣지 못함
+        return AiSetupError(BAD_KEY_FORMAT)
     code = _status_code(e)
     if code == 429:
         return AiBusy("Google AI 사용 한도에 잠시 걸렸습니다. 잠시 후 다시 눌러 주세요.")
@@ -94,7 +129,40 @@ def explain_failure(e: BaseException) -> AiError:
         return AiError("AI 모델 이름을 찾을 수 없습니다. 관리자에게 GEMINI_MODEL 설정 확인을 요청해 주세요.")
     if code == 400:
         return AiError("Google AI가 요청을 거부했습니다. 잠시 후 다시 시도하거나 드롭다운에서 직접 지정해 주세요.")
-    return AiError("AI를 호출하지 못했습니다. 네트워크 연결을 확인해 주세요.")
+    if code is None and _is_network_error(e):
+        return AiError(NETWORK)
+    return AiError(UNEXPECTED)
+
+
+# ------------------------------------------------------------------ 서버 로그
+# 화면에는 원인별 문구만 보여주고, 원본 예외 종류·메시지는 서버 로그(표준 오류)에만 남긴다.
+# Streamlit Community Cloud 에서는 앱 관리 화면의 로그에서 볼 수 있다. API 키는 반드시 가린다.
+log = logging.getLogger("excel_merger.ai")
+if not log.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s [excel-merger AI] %(levelname)s %(message)s"))
+    log.addHandler(_handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+
+_KEY_LIKE = re.compile(r"AIza[0-9A-Za-z_\-]{10,}")
+_KEY_PARAM = re.compile(r"(?i)(key=|x-goog-api-key['\"]?\s*[:=]\s*['\"]?)[^&\s'\"]+")
+MAX_LOG_CHARS = 500
+
+
+def redact(text: Any, api_key: str | None = None) -> str:
+    """로그용 문자열에서 API 키를 가린다 (넘겨받은 키 값, Google 키 모양, key= 파라미터)."""
+    s = str(text)
+    if api_key:
+        s = s.replace(api_key, "***")
+    s = _KEY_LIKE.sub("***", s)
+    s = _KEY_PARAM.sub(lambda m: m.group(1) + "***", s)
+    return s[:MAX_LOG_CHARS]
+
+
+def _log_failure(e: BaseException, attempt: int, total: int, api_key: str | None, shown: AiError) -> None:
+    log.warning("AI 호출 실패 (시도 %d/%d): %s.%s: %s -> 화면 문구: %s", attempt, total,
+                type(e).__module__, type(e).__name__, redact(e, api_key), shown)
 
 
 class CallBudget:
@@ -371,6 +439,11 @@ def recommend(scenario, plans, *, api_key: str | None, model: str = DEFAULT_MODE
     """
     if not api_key:
         raise AiNotSent("AI 키(GEMINI_API_KEY)가 설정되지 않았습니다.")
+    if not _KEY_CHARS.fullmatch(api_key):
+        # 클라우드 Secrets 칸에 붙여 넣으며 따옴표·공백·한글이 섞인 경우. 보내기 전에 막는다 (키 값은 로그에도 남기지 않음)
+        log.warning("AI 키 형식 오류: 길이 %d자, 공백 포함=%s, ASCII 아닌 문자 포함=%s", len(api_key),
+                    any(ch.isspace() for ch in api_key), not api_key.isascii())
+        raise AiSetupError(BAD_KEY_FORMAT)
     request = build_request(scenario, plans, with_examples)
     if not request["files"]:
         raise AiNotSent("AI에게 물어볼 열이 없습니다. 모든 기준열 또는 원본 열이 이미 매칭돼 있습니다.")
@@ -392,11 +465,16 @@ def recommend(scenario, plans, *, api_key: str | None, model: str = DEFAULT_MODE
             raise AiNotSent(reason)
         try:
             text = call(prompt, api_key, model, timeout)
+            if attempt:
+                log.info("AI 호출 성공 (시도 %d/%d, 모델 %s)", attempt + 1, len(delays), model)
             break
-        except concurrent.futures.TimeoutError:
-            raise AiError(f"AI 응답이 {int(timeout)}초 안에 오지 않았습니다.") from None
+        except concurrent.futures.TimeoutError as e:
+            err = AiError(f"AI 응답이 {int(timeout)}초 안에 오지 않았습니다.")
+            _log_failure(e, attempt + 1, len(delays), api_key, err)
+            raise err from None
         except Exception as e:
             err = explain_failure(e)
+            _log_failure(e, attempt + 1, len(delays), api_key, err)
             if isinstance(err, AiBusy) and attempt < len(delays) - 1:
                 busy = err
                 continue
