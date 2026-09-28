@@ -1,0 +1,11 @@
+[server]
+# 업로드 파일 하나의 최대 크기(MB). engine/reader.py 의 MAX_FILE_BYTES(20MB)와 같게 둔다.
+maxUploadSize = 20
+
+[client]
+# 오류가 나도 화면에 내부 경로·스택을 보여주지 않는다.
+showErrorDetails = "none"
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

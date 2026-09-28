@@ -1,0 +1,442 @@
+"""엑셀 자동 취합·검증기 — 화면 (Streamlit).
+
+흐름: 시나리오 선택 -> 파일 올리기(또는 샘플 체험) -> 열 매칭 확인·수정 -> 실행 -> 결과 확인·다운로드
+
+- 시나리오 이름·열 이름은 이 파일에도 없다. 모두 scenarios/*.yaml 에서 읽는다.
+- 파일 읽기와 실행은 engine.jobs.run_job 으로 하위 프로세스에서 돌리고, 단계마다 시간 제한을 둔다.
+- 올린 파일은 세션마다 따로 만든 임시 폴더에 복사해서 쓴다. 원본(샘플 포함)은 절대 수정하지 않는다.
+"""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+import time
+import uuid
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+import pandas as pd
+import streamlit as st
+
+from engine import KINDS, ReadError, ScenarioError, list_scenarios, pre_run_warnings
+from engine.jobs import DEFAULT_TIMEOUT, JobError, TimeLimitError, run_job
+from engine.matching import USER
+from engine.merge import MAX_FILES
+from engine.normalize import display
+from engine.reader import EXCEL_SUFFIXES, MAX_FILE_BYTES, MAX_ROWS
+from engine.writer import ACTION_COL, AUTO_FIXED, ERROR_COLS
+
+ROOT = Path(__file__).resolve().parent
+SCENARIO_DIR = ROOT / "scenarios"
+SAMPLE_DIR = ROOT / "samples"
+
+# ---- 제한 (화면 단계)
+TIME_LIMIT = DEFAULT_TIMEOUT          # 초. 파일 읽기, 실행 단계마다
+MAX_TOTAL_ROWS = 200_000              # 모든 파일의 데이터 행 합계
+MB = 1024 * 1024
+SESSION_ROOT = Path(tempfile.gettempdir()) / "excel-merger-sessions"
+STALE_SECONDS = 6 * 3600              # 이보다 오래 쓰지 않은 세션 폴더는 지운다
+
+NO_SOURCE = "(선택 안 함)"
+
+
+# ================================================================== 상태·작업 폴더
+def reset_from(stage: str) -> None:
+    """stage 이후 단계의 상태를 지운다. 'files' -> 파일·매칭·결과, 'result' -> 결과만."""
+    ss = st.session_state
+    if stage == "files":
+        ss.plans = None
+        ss.load_id = None
+        ss.load_source = None
+    ss.result = None
+    ss.outputs = {}
+
+
+def on_scenario_change() -> None:
+    """시나리오가 바뀌면 매칭부터 다시 한다. 올려 둔 파일이 있으면 새 시나리오로 다시 읽는다."""
+    reset_from("files")
+    st.session_state.upload_sig = None
+
+
+def on_apply_change() -> None:
+    # 체크박스가 잠시 화면에서 사라져도(결과를 다시 만들 때) 선택을 기억한다
+    st.session_state.apply_pref = st.session_state.apply_suggestions
+
+
+def init_state() -> None:
+    ss = st.session_state
+    defaults = {"plans": None, "load_id": None, "load_source": None, "result": None, "outputs": {},
+                "messages": [], "upload_sig": None, "uploader_n": 0, "map_error": None,
+                "apply_pref": False}
+    for k, v in defaults.items():
+        if k not in ss:
+            ss[k] = v
+
+
+def _cleanup_stale() -> None:
+    now = time.time()
+    try:
+        entries = list(SESSION_ROOT.iterdir())
+    except OSError:
+        return
+    for d in entries:
+        try:
+            if d.is_dir() and now - d.stat().st_mtime > STALE_SECONDS:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+
+
+def workspace() -> Path:
+    """이 세션만 쓰는 임시 폴더."""
+    ws = st.session_state.get("workspace")
+    if ws is None or not Path(ws).is_dir():
+        SESSION_ROOT.mkdir(parents=True, exist_ok=True)
+        _cleanup_stale()
+        ws = tempfile.mkdtemp(prefix="s_", dir=SESSION_ROOT)
+        st.session_state.workspace = ws
+    return Path(ws)
+
+
+def fresh_dir(name: str) -> Path:
+    """작업 폴더 안의 하위 폴더를 비우고 새로 만든다."""
+    d = workspace() / name
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir(parents=True)
+    return d
+
+
+def out_dir() -> Path:
+    d = workspace() / "out"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def say(kind: str, text: str) -> None:
+    """다음 화면 그리기에서 보여줄 안내 (error | warning | success)."""
+    st.session_state.messages.append((kind, text))
+
+
+def show_messages() -> None:
+    for kind, text in st.session_state.messages:
+        getattr(st, kind)(text)
+    st.session_state.messages = []
+
+
+# ================================================================== 파일 불러오기
+def safe_name(name: str) -> str:
+    """업로드 파일 이름에서 폴더 부분을 떼어 낸다 (Windows 구분자 '\\'도 처리)."""
+    return Path(PurePosixPath(name.replace("\\", "/")).name).name
+
+
+def load_files(scenario, items: list[tuple[str, Any]], source: str) -> None:
+    """items: (파일 이름, bytes 또는 복사할 원본 경로). 검사 -> 세션 폴더에 복사 -> 읽기·매칭."""
+    reset_from("files")
+    if not items:
+        return
+    if len(items) > MAX_FILES:
+        say("error", f"파일 수 제한에 걸렸습니다: 한 번에 최대 {MAX_FILES}개까지 올릴 수 있습니다 "
+                     f"(올린 파일 {len(items)}개).")
+        return
+    names: list[str] = []
+    for name, data in items:
+        n = safe_name(name)
+        if not n or n in (".", ".."):
+            say("error", "파일 이름을 알 수 없는 파일이 있습니다. 이름을 바꿔 다시 올려 주세요.")
+            return
+        if Path(n).suffix.lower() not in EXCEL_SUFFIXES:
+            say("error", f"'{n}'은 엑셀(.xlsx) 파일이 아닙니다. .xls 파일은 엑셀에서 .xlsx로 다시 저장해 주세요.")
+            return
+        size = len(data) if isinstance(data, (bytes, bytearray)) else Path(data).stat().st_size
+        if size > MAX_FILE_BYTES:
+            say("error", f"파일 크기 제한에 걸렸습니다: '{n}'은 {size / MB:.1f}MB입니다 "
+                         f"(파일당 최대 {MAX_FILE_BYTES // MB}MB).")
+            return
+        if n in names:
+            say("error", f"같은 이름의 파일 '{n}'이 두 개 있습니다. 한 파일의 이름을 바꿔 다시 올려 주세요.")
+            return
+        names.append(n)
+
+    in_dir = fresh_dir("in")
+    shutil.rmtree(workspace() / "out", ignore_errors=True)
+    paths = []
+    for n, (_, data) in zip(names, items):
+        dest = in_dir / n
+        if isinstance(data, (bytes, bytearray)):
+            dest.write_bytes(data)
+        else:
+            shutil.copyfile(data, dest)   # 샘플 원본은 건드리지 않고 복사본을 쓴다
+        paths.append(dest)
+
+    try:
+        with st.spinner("파일을 읽고 열을 맞추는 중입니다…"):
+            plans = run_job("prepare", scenario, paths, timeout=TIME_LIMIT)
+    except TimeLimitError as e:
+        say("error", f"처리 시간 제한에 걸렸습니다. {e}")
+        return
+    except (ReadError, ScenarioError, JobError) as e:
+        say("error", f"파일을 읽지 못했습니다. {e}")
+        return
+
+    total = sum(len(p.table.rows) for p in plans)
+    if total > MAX_TOTAL_ROWS:
+        say("error", f"행 수 제한에 걸렸습니다: 모든 파일의 데이터가 합계 {total:,}행입니다 "
+                     f"(최대 {MAX_TOTAL_ROWS:,}행). 파일을 나눠서 취합해 주세요.")
+        return
+    ss = st.session_state
+    ss.plans = plans
+    ss.load_id = uuid.uuid4().hex[:8]
+    ss.load_source = source
+    ss.map_error = None
+
+
+def sample_files(scenario) -> list[Path]:
+    """samples/<시나리오 파일 이름>/ 안의 엑셀 파일 (없으면 빈 목록)."""
+    folder = SAMPLE_DIR / scenario.key
+    if not folder.is_dir():
+        return []
+    return sorted(p for p in folder.iterdir()
+                  if p.is_file() and p.suffix.lower() in EXCEL_SUFFIXES and not p.name.startswith("~$"))
+
+
+# ================================================================== 열 매칭
+def map_key(fi: int, si: int) -> str:
+    return f"map_{st.session_state.load_id}_{fi}_{si}"
+
+
+def on_map_change(fi: int, standard: str, key: str) -> None:
+    ss = st.session_state
+    plan = ss.plans[fi]
+    chosen = ss[key]
+    try:
+        plan.match.assign(standard, chosen)
+        ss.map_error = None
+        reset_from("result")
+    except ValueError as e:
+        ss.map_error = f"[{plan.file_name}] {e}"
+        ss[key] = plan.match.get(standard).source_index   # 선택을 되돌린다
+
+
+def render_matching(scenario) -> None:
+    plans = st.session_state.plans
+    st.subheader("3. 열 매칭 확인")
+    st.caption("파일마다 원본 열이 어느 기준열로 들어가는지 확인하세요. 틀렸다면 드롭다운에서 고칠 수 있습니다. "
+               "매칭 방법: 정확히 일치 / 동의어 / 사용자 지정 / 매칭 안 됨")
+    if st.session_state.map_error:
+        st.error(st.session_state.map_error)
+    warnings = pre_run_warnings(plans)
+    if warnings:
+        st.warning("실행 전에 확인해 주세요.\n\n" + "\n".join(f"- {w}" for w in warnings))
+
+    for fi, plan in enumerate(plans):
+        t, m = plan.table, plan.match
+        flag = " · 확인 필요" if plan.warnings() else ""
+        label = f"{t.file_name} — 머리글 {t.header_row}행, 데이터 {len(t.rows):,}행{flag}"
+        with st.expander(label, expanded=bool(flag)):
+            for w in plan.warnings():
+                st.warning(w)
+            head = st.columns([3, 4, 2])
+            head[0].markdown("**원본 열**")
+            head[1].markdown("**→ 기준열**")
+            head[2].markdown("**매칭 방법**")
+            options: list[int | None] = [None] + list(range(len(m.headers)))
+            for si, cm in enumerate(m.matches):
+                key = map_key(fi, si)
+                if key not in st.session_state:
+                    st.session_state[key] = cm.source_index
+                row = st.columns([3, 4, 2], vertical_alignment="center")
+                row[0].selectbox(
+                    f"{cm.standard}의 원본 열", options, key=key,
+                    format_func=lambda i, m=m: NO_SOURCE if i is None else m.column_label(i),
+                    on_change=on_map_change, args=(fi, cm.standard, key), label_visibility="collapsed")
+                req = " (필수)" if cm.required else ""
+                row[1].markdown(f"→ **{cm.standard}**{req}")
+                method = cm.method
+                if cm.method == USER:
+                    method = f":blue[{method}]"
+                elif cm.source_index is None:
+                    method = f":red[{method}]" if cm.required else f":gray[{method}]"
+                row[2].markdown(method)
+            unmatched = [m.column_label(i) for i in m.unmatched_sources]
+            st.caption("매칭 안 된 원본 열: " + (", ".join(unmatched) if unmatched else "없음"))
+
+
+# ================================================================== 결과
+def cell_text(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, str) and v != v.strip():
+        return f'"{v}"'   # 앞뒤 공백이 보이도록
+    return display(v)
+
+
+def issues_frame(result, applied: bool) -> pd.DataFrame:
+    fixes = result.suggestion_map() if applied else {}
+    rows = []
+    for i in result.issues:
+        r = [i.file, "(전체)" if i.row is None else i.row, i.column or "(없음)", i.standard, i.kind,
+             "(빈칸)" if i.value is None else cell_text(i.value), i.message,
+             cell_text(i.suggestion), i.dup_group or ""]
+        if applied:
+            r.append(AUTO_FIXED if (i.file, i.row, i.standard) in fixes else "")
+        rows.append(r)
+    cols = ERROR_COLS + ([ACTION_COL] if applied else [])
+    df = pd.DataFrame(rows, columns=cols)
+    df["행"] = df["행"].astype(str)
+    return df
+
+
+def run_merge(scenario) -> None:
+    ss = st.session_state
+    reset_from("result")
+    applied = bool(ss.apply_pref)
+    try:
+        with st.spinner("오류를 검사하고 결과 파일을 만드는 중입니다…"):
+            result, path = run_job("execute", scenario, ss.plans, out_dir(), applied, timeout=TIME_LIMIT)
+    except TimeLimitError as e:
+        say("error", f"처리 시간 제한에 걸렸습니다. {e}")
+        return
+    except (ReadError, ScenarioError, JobError) as e:
+        say("error", str(e))
+        return
+    ss.result = result
+    ss.outputs = {applied: str(path)}
+
+
+def output_for(applied: bool) -> Path | None:
+    ss = st.session_state
+    if applied not in ss.outputs:
+        try:
+            with st.spinner("결과 파일을 만드는 중입니다…"):
+                ss.outputs[applied] = str(run_job("write", ss.result, out_dir(), applied, timeout=TIME_LIMIT))
+        except TimeLimitError as e:
+            st.error(f"처리 시간 제한에 걸렸습니다. {e}")
+            return None
+        except (ReadError, ScenarioError, JobError) as e:
+            st.error(str(e))
+            return None
+    return Path(ss.outputs[applied])
+
+
+def render_result() -> None:
+    result = st.session_state.result
+    st.subheader("4. 실행 결과")
+    counts = result.counts()
+    fixes = result.suggestion_map()
+
+    top = st.columns(4)
+    top[0].metric("파일 수", f"{len(result.plans)}개")
+    top[1].metric("취합 행 수", f"{len(result.rows):,}행")
+    top[2].metric("오류 합계", f"{len(result.issues):,}건")
+    top[3].metric("수정 제안 있음", f"{len(fixes):,}건")
+    kinds = st.columns(len(KINDS))
+    for col, k in zip(kinds, KINDS):
+        col.metric(k, f"{counts[k]:,}건")
+
+    st.subheader("5. 결과 엑셀 받기")
+    if "apply_suggestions" not in st.session_state:
+        st.session_state.apply_suggestions = st.session_state.apply_pref
+    applied = st.checkbox(
+        "수정 제안값 일괄 적용", key="apply_suggestions", on_change=on_apply_change,
+        help="켜면 결과 엑셀의 오류 셀 중 수정 제안값이 있는 셀을 제안값으로 바꾸고 초록색으로 표시합니다. "
+             "오류목록에는 '처리' 열에 '자동 수정됨'으로 남습니다. 원본 파일은 바뀌지 않습니다.")
+    if applied:
+        st.caption(f"제안값이 있는 {len(fixes):,}개 셀을 바꿔서 저장합니다. 나머지 오류 셀은 원래 값 그대로입니다.")
+    else:
+        st.caption("오류 셀은 원래 값 그대로 두고 색만 칠해서 저장합니다.")
+    path = output_for(applied)
+    if path is not None and path.is_file():
+        st.download_button("결과 엑셀 내려받기", data=path.read_bytes(), file_name=path.name,
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="download", type="primary", on_click="ignore")
+
+    st.subheader("오류 목록")
+    present = [k for k in KINDS if counts[k]]
+    chosen = st.multiselect("오류 종류로 거르기", options=list(KINDS), default=present, key="kind_filter",
+                            placeholder="오류 종류를 고르세요")
+    df = issues_frame(result, applied)
+    shown = df[df["오류 종류"].isin(chosen)]
+    st.caption(f"{len(shown):,}건 표시 (전체 {len(df):,}건)")
+    st.dataframe(shown, hide_index=True, width="stretch")
+
+
+# ================================================================== 화면
+def main() -> None:
+    st.set_page_config(page_title="엑셀 자동 취합·검증기", page_icon=":material/table_chart:", layout="wide")
+    init_state()
+    ss = st.session_state
+
+    st.title("엑셀 자동 취합·검증기")
+    st.write("부서·협력사·지점마다 양식이 다른 엑셀 파일을 하나로 모으고, 빈칸·형식·범위·허용값·중복 오류를 찾아 표시합니다. "
+             "올린 파일은 바꾸지 않고, 결과는 새 엑셀 파일로 만듭니다.")
+
+    # ---- 1. 시나리오
+    try:
+        scenarios = list_scenarios(SCENARIO_DIR)
+    except ScenarioError as e:
+        st.error(f"시나리오 설정 파일에 문제가 있습니다. {e}")
+        st.stop()
+    if not scenarios:
+        st.error("scenarios 폴더에 시나리오 설정 파일(.yaml)이 없습니다.")
+        st.stop()
+    by_key = {s.key: s for s in scenarios}
+
+    st.subheader("1. 시나리오 선택")
+    key = st.selectbox("어떤 엑셀을 취합하나요?", list(by_key), key="scenario",
+                       format_func=lambda k: by_key[k].name, on_change=on_scenario_change)
+    scenario = by_key[key]
+    if scenario.description:
+        st.caption(scenario.description)
+    with st.expander("이 시나리오의 기준열 보기"):
+        st.dataframe(pd.DataFrame([{
+            "기준열": c.name, "필수": "예" if c.required else "", "형식": c.fmt,
+            "범위": "" if c.range is None else f"{display(c.range[0])} ~ {display(c.range[1])}",
+            "허용값": "" if c.allowed is None else ", ".join(display(a) for a in c.allowed),
+            "다른 이름(동의어)": ", ".join(c.aliases)} for c in scenario.columns]),
+            hide_index=True, width="stretch")
+        if scenario.dup_keys:
+            st.caption("중복 판단 기준: " + " + ".join(scenario.dup_keys))
+
+    samples = sample_files(scenario)
+    if samples:
+        if st.button("샘플 파일로 바로 체험", key="sample_btn", type="primary",
+                     help=f"이 시나리오의 샘플 엑셀 {len(samples)}개를 올린 것처럼 불러옵니다."):
+            ss.uploader_n += 1          # 올려 둔 파일 목록은 비운다
+            ss.upload_sig = None
+            load_files(scenario, [(p.name, p) for p in samples], "sample")
+
+    # ---- 2. 업로드
+    st.subheader("2. 엑셀 파일 올리기")
+    st.caption(f"제한: 한 번에 최대 {MAX_FILES}개 · 파일당 {MAX_FILE_BYTES // MB}MB · 파일당 {MAX_ROWS:,}행 · "
+               f"모든 파일 합계 {MAX_TOTAL_ROWS:,}행 · 단계마다 처리 시간 {TIME_LIMIT}초")
+    uploads = st.file_uploader("취합할 엑셀 파일(.xlsx)을 모두 골라 올려 주세요.", type=["xlsx", "xlsm"],
+                               accept_multiple_files=True, key=f"uploader_{ss.uploader_n}")
+    sig = tuple((u.file_id, u.name, u.size) for u in uploads) if uploads else None
+    if sig != ss.upload_sig:
+        ss.upload_sig = sig
+        if sig:
+            load_files(scenario, [(u.name, u.getvalue()) for u in uploads], "upload")
+        elif ss.load_source == "upload":
+            reset_from("files")
+    show_messages()
+
+    if not ss.plans:
+        st.info("샘플 파일로 체험하거나, 엑셀 파일을 올리면 다음 단계가 나타납니다.")
+        return
+    src = "샘플 파일" if ss.load_source == "sample" else "올린 파일"
+    st.success(f"{src} {len(ss.plans)}개를 읽었습니다.")
+
+    # ---- 3. 매칭
+    render_matching(scenario)
+
+    # ---- 4. 실행
+    if st.button("취합·검증 실행", key="run_btn", type="primary"):
+        run_merge(scenario)
+        show_messages()
+    if ss.result is not None:
+        render_result()
+
+
+if __name__ == "__main__":   # streamlit run / AppTest 는 이 파일을 __main__ 으로 실행한다
+    main()

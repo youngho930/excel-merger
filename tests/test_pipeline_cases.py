@@ -192,6 +192,18 @@ def test_number_in_date_cell_suggestion_reaches_result_file(tmp_path):
     ws = load_workbook(write_result(result, tmp_path / "out"))["취합결과"]
     assert ws.cell(2, 4).value == 20260901
 
+    # 수정 제안값 일괄 적용: 제안이 있는 셀만 바뀌고 초록색, 제안이 없는 셀은 원래 값과 오류 색
+    wb = load_workbook(write_result(result, tmp_path / "out", apply_suggestions=True))
+    ws = wb["취합결과"]
+    assert ws.cell(2, 4).value == datetime(2026, 9, 1) and ws.cell(2, 4).fill.fgColor.rgb.endswith("C6EFCE")
+    assert ws.cell(3, 4).value == datetime(2026, 9, 2)
+    assert ws.cell(4, 4).value == 7 and ws.cell(4, 4).fill.fgColor.rgb.endswith("FFEB9C")
+    es = wb["오류목록"]
+    header = [c.value for c in es[1]]
+    assert header[-1] == "처리"
+    done = {es.cell(r, 2).value: es.cell(r, len(header)).value for r in range(2, es.max_row + 1)}
+    assert done == {2: "자동 수정됨", 3: "자동 수정됨", 4: None}
+
 
 def test_duplicate_group_numbers_in_error_sheet(tmp_path):
     sc, ok = _stock_like(tmp_path)

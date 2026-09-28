@@ -115,7 +115,7 @@ def test_result_workbook(key, tmp_path):
         assert path.read_bytes() == data
 
     wb = load_workbook(out)
-    assert wb.sheetnames == ["취합결과", "오류목록"]
+    assert wb.sheetnames == ["취합결과", "오류목록", "범례"]
     ws = wb["취합결과"]
     header = [c.value for c in ws[1]]
     assert header == ["출처 파일", "원래 행"] + sc.column_names

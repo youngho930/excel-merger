@@ -69,6 +69,14 @@ class MergeResult:
         c = Counter(i.kind for i in self.issues)
         return {k: c.get(k, 0) for k in KINDS}
 
+    def suggestion_map(self) -> dict[tuple[str, int, str], Any]:
+        """셀 단위 오류 중 수정 제안값이 있는 것: (파일, 행, 기준명) -> 제안값.
+
+        "수정 제안값 일괄 적용"에서 결과 파일에 반영할 대상이다. 파일 전체 오류와 중복 행은 셀이 아니므로 뺀다.
+        """
+        return {(i.file, i.row, i.standard): i.suggestion for i in self.issues
+                if i.suggestion is not None and i.row is not None and i.kind != DUPLICATE}
+
     def to_dataframe(self, escape_formulas: bool = False):
         """화면 표시용 표. CSV로 내보낼 때는 escape_formulas=True로 수식 주입을 막는다."""
         import pandas as pd
