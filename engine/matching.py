@@ -18,6 +18,7 @@ from .scenario import Scenario
 EXACT = "정확히 일치"
 ALIAS = "동의어"
 USER = "사용자 지정"
+AI = "AI 추천"          # engine/ai_match.py 가 채운다 (사용자가 확인표에서 확인·수정)
 NONE = "매칭 안 됨"
 
 
@@ -102,6 +103,28 @@ class MatchResult:
         target.method = USER if source_index is not None else NONE
         target.matched_alias = None
         self.conflicts = [c for c in self.conflicts if c.standard != standard]
+
+    def suggest(self, standard: str, source_index: int) -> bool:
+        """비어 있는 기준열에 원본 열을 "AI 추천"으로 채운다.
+
+        기준열이 이미 매칭돼 있거나, 원본 열이 다른 기준열에 쓰이고 있거나, 위치가 파일에 없으면
+        아무것도 하지 않고 False. 사용자는 나중에 assign()으로 바꾸거나 해제할 수 있다.
+        """
+        try:
+            target = self.get(standard)
+        except KeyError:
+            return False
+        if target.source_index is not None:
+            return False
+        if not (isinstance(source_index, int) and 0 <= source_index < len(self.headers)):
+            return False
+        if any(m.source_index == source_index for m in self.matches):
+            return False
+        target.source_index = source_index
+        target.source_name = self.headers[source_index]
+        target.method = AI
+        target.matched_alias = None
+        return True
 
     def to_records(self) -> list[dict[str, Any]]:
         """화면 표(st.data_editor)·JSON용."""

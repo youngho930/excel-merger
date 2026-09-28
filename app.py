@@ -18,10 +18,12 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+import yaml
 
 from engine import KINDS, ReadError, ScenarioError, list_scenarios, pre_run_warnings
+from engine import ai_match
 from engine.jobs import DEFAULT_TIMEOUT, JobError, TimeLimitError, run_job
-from engine.matching import USER
+from engine.matching import AI, USER
 from engine.merge import MAX_FILES
 from engine.normalize import display
 from engine.reader import EXCEL_SUFFIXES, MAX_FILE_BYTES, MAX_ROWS
@@ -38,6 +40,7 @@ MB = 1024 * 1024
 SESSION_ROOT = Path(tempfile.gettempdir()) / "excel-merger-sessions"
 STALE_SECONDS = 6 * 3600              # 이보다 오래 쓰지 않은 세션 폴더는 지운다
 MAX_DUP_GROUPS_SHOWN = 50             # 화면에서 남길 행을 고를 수 있는 중복 그룹 수
+DEMO_MANIFEST = "demo.yaml"           # samples/<폴더>/demo.yaml 이 있으면 AI 매칭 체험 폴더
 
 NO_SOURCE = "(선택 안 함)"
 
@@ -50,6 +53,7 @@ def reset_from(stage: str) -> None:
         ss.plans = None
         ss.load_id = None
         ss.load_source = None
+        ss.ai_message = None
     ss.result = None
     ss.result_id = None
     ss.outputs = {}
@@ -72,7 +76,8 @@ def init_state() -> None:
     ss = st.session_state
     defaults = {"plans": None, "load_id": None, "load_source": None, "result": None, "outputs": {},
                 "messages": [], "upload_sig": None, "uploader_n": 0, "map_error": None,
-                "apply_pref": False, "excluded": set(), "result_id": None, "current_output": None}
+                "apply_pref": False, "excluded": set(), "result_id": None, "current_output": None,
+                "pending_demo": None, "ai_calls": 0, "ai_message": None}
     for k, v in defaults.items():
         if k not in ss:
             ss[k] = v
@@ -198,10 +203,34 @@ def load_files(scenario, items: list[tuple[str, Any]], source: str) -> None:
 def sample_files(scenario) -> list[Path]:
     """samples/<시나리오 파일 이름>/ 안의 엑셀 파일 (없으면 빈 목록)."""
     folder = SAMPLE_DIR / scenario.key
-    if not folder.is_dir():
+    if not folder.is_dir() or (folder / DEMO_MANIFEST).exists():   # 체험 폴더는 시나리오 샘플이 아니다
         return []
     return sorted(p for p in folder.iterdir()
                   if p.is_file() and p.suffix.lower() in EXCEL_SUFFIXES and not p.name.startswith("~$"))
+
+
+def ai_demos(scenario_keys) -> list[dict]:
+    """samples/*/demo.yaml (AI 매칭 체험 설명서). 시나리오가 있고 파일이 모두 있는 것만."""
+    out = []
+    for manifest in sorted(SAMPLE_DIR.glob(f"*/{DEMO_MANIFEST}")):
+        try:
+            data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+            files = [manifest.parent / safe_name(str(f)) for f in data["files"]]
+            key = str(data["scenario"])
+        except Exception:
+            continue
+        if key in scenario_keys and files and all(f.is_file() for f in files):
+            out.append({"folder": manifest.parent.name, "scenario": key, "files": files,
+                        "description": str(data.get("description") or "")})
+    return out
+
+
+def on_demo_click(demo: dict) -> None:
+    ss = st.session_state
+    ss.scenario = demo["scenario"]
+    on_scenario_change()
+    ss.uploader_n += 1
+    ss.pending_demo = demo["folder"]
 
 
 # ================================================================== 열 매칭
@@ -222,20 +251,96 @@ def on_map_change(fi: int, standard: str, key: str) -> None:
         ss[key] = plan.match.get(standard).source_index   # 선택을 되돌린다
 
 
+def ai_settings() -> tuple[str | None, str]:
+    """(키, 모델). st.secrets -> 환경변수. 설정 파일이 없어도 오류 없이 넘어간다."""
+    secrets: dict[str, Any] = {}
+    try:
+        for name in (ai_match.KEY_NAME, ai_match.MODEL_KEY_NAME):
+            if name in st.secrets:
+                secrets[name] = st.secrets[name]
+    except Exception:
+        secrets = {}
+    return ai_match.get_settings(secrets)
+
+
+def run_ai(scenario, api_key: str, model: str, with_examples: bool) -> None:
+    ss = st.session_state
+    ss.ai_calls += 1
+    try:
+        with st.spinner("AI에게 매칭 추천을 받는 중입니다…"):
+            outcome = ai_match.recommend(scenario, ss.plans, api_key=api_key, model=model,
+                                         with_examples=with_examples)
+    except ai_match.AiError as e:
+        ss.ai_message = ("warning", f"AI 추천을 받지 못했습니다. {e} 지금은 {ai_match.NO_AI_NOTICE}입니다.")
+        return
+    # 채운 추천을 드롭다운에도 반영 (드롭다운은 이 아래에서 그려지므로 지금 바꿔도 된다)
+    for s in outcome.accepted:
+        m = ss.plans[s.file_index].match
+        si = next(i for i, cm in enumerate(m.matches) if cm.standard == s.standard)
+        ss[map_key(s.file_index, si)] = m.matches[si].source_index
+    reset_from("result")
+    dropped = f" 검증에서 버린 추천: {outcome.dropped_text()}." if outcome.dropped else ""
+    if outcome.applied:
+        ss.ai_message = ("success", f"AI 추천 {outcome.applied}건을 확인표에 'AI 추천'으로 채웠습니다. "
+                                    f"아래 표에서 맞는지 확인하고, 틀리면 드롭다운에서 바꾸거나 해제해 주세요.{dropped}")
+    else:
+        ss.ai_message = ("info", f"AI가 확실한 짝을 찾지 못했습니다. 드롭다운에서 직접 지정해 주세요.{dropped}")
+
+
+def render_ai(scenario) -> None:
+    ss = st.session_state
+    api_key, model = ai_settings()
+    need = bool(ai_match.build_request(scenario, ss.plans)["files"])
+    left = ai_match.MAX_CALLS_PER_SESSION - ss.ai_calls
+    with st.container(border=True):
+        st.markdown("**AI 매칭 추천 (선택)** — 동의어로도 찾지 못한 열만 AI에게 물어봅니다.")
+        if not api_key:
+            st.info(f"{ai_match.NO_AI_NOTICE}입니다. AI 추천을 쓰려면 관리자가 GEMINI_API_KEY를 설정해야 합니다.")
+        if not need:
+            st.caption("동의어로 매칭되지 않은 기준열·원본 열이 없어 AI 추천이 필요 없습니다.")
+        else:
+            with_examples = st.checkbox(
+                "예시값 함께 보내기", key="ai_examples",
+                help=f"켜면 매칭 안 된 원본 열마다 데이터 예시값 {ai_match.EXAMPLES_PER_COLUMN}개를 함께 보냅니다. "
+                     "추천이 더 정확해질 수 있지만 파일의 실제 값이 외부(Google Gemini)로 전송됩니다.")
+            request = ai_match.build_request(scenario, ss.plans, with_examples)
+            what = ("매칭 안 된 기준열 이름과 원본 열 이름, 원본 열마다 예시값 "
+                    f"{ai_match.EXAMPLES_PER_COLUMN}개" if with_examples
+                    else "매칭 안 된 기준열 이름과 원본 열 이름만 (데이터 값은 보내지 않음)")
+            st.caption(f"Google Gemini({model})로 보내는 내용: {what}. 파일 이름은 F1, F2 같은 번호로 바꿔 보냅니다.")
+            with st.expander("전송될 내용 미리 보기"):
+                st.code(ai_match.preview_text(request), language="json")
+            clicked = st.button("AI에게 매칭 추천 받기", key="ai_btn", disabled=not api_key or left <= 0)
+            if clicked and api_key and left > 0:
+                run_ai(scenario, api_key, model, with_examples)
+                st.rerun()   # 남은 횟수·확인표를 새 상태로 다시 그린다
+        st.caption(f"남은 AI 호출: {max(left, 0)}/{ai_match.MAX_CALLS_PER_SESSION}회 (세션당)")
+        if left <= 0:
+            st.warning(f"이 세션의 AI 호출 횟수({ai_match.MAX_CALLS_PER_SESSION}회)를 모두 썼습니다. "
+                       "남은 열은 드롭다운에서 직접 지정해 주세요.")
+        if ss.ai_message:
+            kind, text = ss.ai_message
+            getattr(st, kind)(text)
+
+
 def render_matching(scenario) -> None:
     plans = st.session_state.plans
     st.subheader("3. 열 매칭 확인")
     st.caption("파일마다 원본 열이 어느 기준열로 들어가는지 확인하세요. 틀렸다면 드롭다운에서 고칠 수 있습니다. "
-               "매칭 방법: 정확히 일치 / 동의어 / 사용자 지정 / 매칭 안 됨")
+               "매칭 방법: 정확히 일치 / 동의어 / AI 추천 / 사용자 지정 / 매칭 안 됨")
     if st.session_state.map_error:
         st.error(st.session_state.map_error)
+    render_ai(scenario)
     warnings = pre_run_warnings(plans)
     if warnings:
         st.warning("실행 전에 확인해 주세요.\n\n" + "\n".join(f"- {w}" for w in warnings))
 
     for fi, plan in enumerate(plans):
         t, m = plan.table, plan.match
-        flag = " · 확인 필요" if plan.warnings() else ""
+        n_ai = sum(1 for cm in m.matches if cm.method == AI)
+        flag = " · 확인 필요" if plan.warnings() or n_ai else ""
+        if n_ai:
+            flag += f" · AI 추천 {n_ai}개"
         label = f"{t.file_name} — 머리글 {t.header_row}행, 데이터 {len(t.rows):,}행{flag}"
         with st.expander(label, expanded=bool(flag)):
             for w in plan.warnings():
@@ -259,6 +364,8 @@ def render_matching(scenario) -> None:
                 method = cm.method
                 if cm.method == USER:
                     method = f":blue[{method}]"
+                elif cm.method == AI:
+                    method = f":violet[**{method}**] (확인 필요)"
                 elif cm.source_index is None:
                     method = f":red[{method}]" if cm.required else f":gray[{method}]"
                 row[2].markdown(method)
@@ -470,12 +577,24 @@ def main() -> None:
             st.caption("중복 판단 기준: " + " + ".join(scenario.dup_keys))
 
     samples = sample_files(scenario)
+    demos = ai_demos(set(by_key))
+    buttons = st.columns(2 if demos else 1)
     if samples:
-        if st.button("샘플 파일로 바로 체험", key="sample_btn", type="primary",
-                     help=f"이 시나리오의 샘플 엑셀 {len(samples)}개를 올린 것처럼 불러옵니다."):
+        if buttons[0].button("샘플 파일로 바로 체험", key="sample_btn", type="primary",
+                             help=f"이 시나리오의 샘플 엑셀 {len(samples)}개를 올린 것처럼 불러옵니다."):
             ss.uploader_n += 1          # 올려 둔 파일 목록은 비운다
             ss.upload_sig = None
             load_files(scenario, [(p.name, p) for p in samples], "sample")
+    for i, demo in enumerate(demos):
+        buttons[-1].button("AI 매칭 체험", key=f"ai_demo_btn_{i}", on_click=on_demo_click, args=(demo,),
+                           help=f"{demo['description']} ({by_key[demo['scenario']].name} 시나리오로 바뀝니다). "
+                                "열 이름이 동의어 사전에 없어서 AI 추천이 필요한 파일입니다.")
+    if ss.pending_demo:
+        demo = next((d for d in demos if d["folder"] == ss.pending_demo), None)
+        ss.pending_demo = None
+        ss.upload_sig = None
+        if demo is not None and demo["scenario"] == key:
+            load_files(scenario, [(p.name, p) for p in demo["files"]], "demo")
 
     # ---- 2. 업로드
     st.subheader("2. 엑셀 파일 올리기")
@@ -495,7 +614,7 @@ def main() -> None:
     if not ss.plans:
         st.info("샘플 파일로 체험하거나, 엑셀 파일을 올리면 다음 단계가 나타납니다.")
         return
-    src = "샘플 파일" if ss.load_source == "sample" else "올린 파일"
+    src = {"sample": "샘플 파일", "demo": "AI 매칭 체험 파일"}.get(ss.load_source, "올린 파일")
     st.success(f"{src} {len(ss.plans)}개를 읽었습니다.")
 
     # ---- 3. 매칭

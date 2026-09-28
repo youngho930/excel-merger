@@ -1,0 +1,20 @@
+# scripts/make_ai_demo.py 가 만든다. 직접 고치지 말고 스크립트를 고친 뒤 다시 실행하세요.
+scenario: incoming_inspection
+description: 동의어 사전에 없는 열 이름을 쓴 신규 협력사의 수입검사 결과표
+files:
+- 수입검사_AI체험_신규협력사.xlsx
+ai_targets:
+  자재 식별번호: 품목코드
+  공급사: 협력사
+  입하 수량: 입고수량
+  불량 개수: 불량수량
+  합부: 판정
+expected_errors:
+- row: 4
+  column: 입하 수량
+  standard: 입고수량
+  kind: 형식 오류
+- row: 7
+  column: 합부
+  standard: 판정
+  kind: 허용값 아닌 값
