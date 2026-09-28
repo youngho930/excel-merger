@@ -349,8 +349,9 @@ def run_ai(scenario, api_key: str, model: str, with_examples: bool) -> None:
             outcome = ai_match.recommend(scenario, ss.plans, api_key=api_key, model=model,
                                          with_examples=with_examples)
     except ai_match.AiError as e:
-        if isinstance(e, ai_match.AiNotSent):
-            ss.ai_calls -= 1   # 실제로 보내지 않았으면 세션 횟수에 넣지 않는다
+        if isinstance(e, (ai_match.AiNotSent, ai_match.AiBusy)):
+            # 보내지 않았거나 Google 쪽 일시적 오류(503·429)로 끝났으면 세션 횟수에 넣지 않는다
+            ss.ai_calls -= 1
         ss.ai_message = ("warning", f"AI 추천을 받지 못했습니다. {e} 지금은 {ai_match.NO_AI_NOTICE}입니다.")
         return
     # 채운 추천을 드롭다운에도 반영 (드롭다운은 이 아래에서 그려지므로 지금 바꿔도 된다)
@@ -682,17 +683,20 @@ def main() -> None:
 
     samples = sample_files(scenario)
     demos = ai_demos(set(by_key))
-    buttons = st.columns(2 if demos else 1)
-    if samples:
-        if buttons[0].button("샘플 파일로 바로 체험", key="sample_btn", type="primary",
-                             help=f"이 시나리오의 샘플 엑셀 {len(samples)}개를 올린 것처럼 불러옵니다."):
-            ss.uploader_n += 1          # 올려 둔 파일 목록은 비운다
-            ss.upload_sig = None
-            load_files(scenario, [(p.name, p) for p in samples], "sample")
-    for i, demo in enumerate(demos):
-        buttons[-1].button("AI 매칭 체험", key=f"ai_demo_btn_{i}", on_click=on_demo_click, args=(demo,),
-                           help=f"{demo['description']} ({by_key[demo['scenario']].name} 시나리오로 바뀝니다). "
-                                "열 이름이 동의어 사전에 없어서 AI 추천이 필요한 파일입니다.")
+    # 체험 버튼은 왼쪽부터 나란히 붙인다 (같은 너비의 칸으로 나누면 두 번째 버튼이 화면 가운데로 떨어진다)
+    sample_clicked = False
+    with st.container(horizontal=True, gap="small"):
+        if samples:
+            sample_clicked = st.button("샘플 파일로 바로 체험", key="sample_btn", type="primary",
+                                       help=f"이 시나리오의 샘플 엑셀 {len(samples)}개를 올린 것처럼 불러옵니다.")
+        for i, demo in enumerate(demos):
+            st.button("AI 매칭 체험", key=f"ai_demo_btn_{i}", on_click=on_demo_click, args=(demo,),
+                      help=f"{demo['description']} ({by_key[demo['scenario']].name} 시나리오로 바뀝니다). "
+                           "열 이름이 동의어 사전에 없어서 AI 추천이 필요한 파일입니다.")
+    if sample_clicked:
+        ss.uploader_n += 1          # 올려 둔 파일 목록은 비운다
+        ss.upload_sig = None
+        load_files(scenario, [(p.name, p) for p in samples], "sample")
     if ss.pending_demo:
         demo = next((d for d in demos if d["folder"] == ss.pending_demo), None)
         ss.pending_demo = None

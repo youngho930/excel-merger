@@ -22,6 +22,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
@@ -56,6 +57,44 @@ class AiError(Exception):
 
 class AiNotSent(AiError):
     """보내기 전에 멈춘 경우 (키 없음, 물어볼 열 없음, 요청이 너무 큼, 전체 한도). 세션 호출 횟수에 넣지 않는다."""
+
+
+class AiBusy(AiError):
+    """Google 쪽 일시적 오류(503 과부하·429 한도 등)로 재시도까지 모두 실패한 경우.
+
+    사용자 잘못이 아니므로 세션 호출 횟수에 넣지 않는다 (앱 전체 한도에는 실제 호출 수만큼 들어간다).
+    """
+
+
+# Google 쪽 일시적 오류: 1초, 3초 뒤 최대 2번 다시 시도한다
+TRANSIENT_CODES = {429, 500, 502, 503, 504}
+RETRY_DELAYS = (1, 3)
+_sleep = time.sleep   # 테스트에서 바꿔 끼운다
+
+
+def _status_code(e: BaseException) -> int | None:
+    """google-genai 예외(APIError)의 HTTP 상태 코드. 없으면 None."""
+    for attr in ("code", "status_code"):
+        v = getattr(e, attr, None)
+        if isinstance(v, int) and not isinstance(v, bool):
+            return v
+    return None
+
+
+def explain_failure(e: BaseException) -> AiError:
+    """호출 예외를 원인별 한국어 오류로 바꾼다. 원래 메시지(키·주소가 섞일 수 있음)는 화면에 내보내지 않는다."""
+    code = _status_code(e)
+    if code == 429:
+        return AiBusy("Google AI 사용 한도에 잠시 걸렸습니다. 잠시 후 다시 눌러 주세요.")
+    if code in TRANSIENT_CODES:
+        return AiBusy("Google AI 서버가 붐빕니다. 잠시 후 다시 눌러 주세요.")
+    if code in (401, 403) or (code == 400 and "api key" in str(e).lower()):
+        return AiError("AI 키가 올바르지 않거나 이 모델을 쓸 권한이 없습니다. 관리자에게 GEMINI_API_KEY 확인을 요청해 주세요.")
+    if code == 404:
+        return AiError("AI 모델 이름을 찾을 수 없습니다. 관리자에게 GEMINI_MODEL 설정 확인을 요청해 주세요.")
+    if code == 400:
+        return AiError("Google AI가 요청을 거부했습니다. 잠시 후 다시 시도하거나 드롭다운에서 직접 지정해 주세요.")
+    return AiError("AI를 호출하지 못했습니다. 네트워크 연결을 확인해 주세요.")
 
 
 class CallBudget:
@@ -226,7 +265,7 @@ def call_gemini(prompt: str, api_key: str, model: str, timeout: float = CALL_TIM
 # ------------------------------------------------------------------ 응답 검증
 def parse_response(text: Any, request: dict[str, Any], plans) -> AiOutcome:
     """응답을 검증해 받아들일 추천만 남긴다. JSON이 깨졌거나 형식이 다르면 AiError (전부 버림)."""
-    broken = "AI 응답이 올바른 JSON 형식이 아니어서 추천을 모두 버렸습니다."
+    broken = "AI 응답을 해석하지 못했습니다(올바른 JSON 형식이 아님). 추천은 모두 버렸습니다."
     if not isinstance(text, str) or len(text) > MAX_RESPONSE_CHARS:
         raise AiError(broken)
     try:
@@ -297,10 +336,12 @@ def recommend(scenario, plans, *, api_key: str | None, model: str = DEFAULT_MODE
               timeout: float = CALL_TIMEOUT_SECONDS, budget: CallBudget | None = None) -> AiOutcome:
     """요청 만들기 -> 크기·전체 한도 확인 -> 호출 -> 검증 -> 확인표에 채우기.
 
-    실패하면 AiError (확인표는 그대로). 보내기 전에 멈춘 경우는 AiNotSent.
+    실패하면 AiError (확인표는 그대로). 보내기 전에 멈춘 경우는 AiNotSent,
+    Google 쪽 일시적 오류로 재시도까지 실패한 경우는 AiBusy.
+    일시적 오류(503·429 등)는 RETRY_DELAYS 간격으로 다시 시도하고, 재시도도 앱 전체 한도에 1회씩 센다.
     """
     if not api_key:
-        raise AiNotSent(f"AI 키(GEMINI_API_KEY)가 설정되지 않았습니다. {NO_AI_NOTICE}입니다.")
+        raise AiNotSent("AI 키(GEMINI_API_KEY)가 설정되지 않았습니다.")
     request = build_request(scenario, plans, with_examples)
     if not request["files"]:
         raise AiNotSent("AI에게 물어볼 열이 없습니다. 모든 기준열 또는 원본 열이 이미 매칭돼 있습니다.")
@@ -308,16 +349,29 @@ def recommend(scenario, plans, *, api_key: str | None, model: str = DEFAULT_MODE
     if len(prompt) > MAX_PROMPT_CHARS:
         raise AiNotSent(f"AI에게 보낼 내용이 너무 깁니다({len(prompt):,}자, 최대 {MAX_PROMPT_CHARS:,}자). "
                         "'예시값 함께 보내기'를 끄거나 파일 수를 줄여 주세요.")
-    reason = (budget or GLOBAL_BUDGET).try_acquire()
-    if reason:
-        raise AiNotSent(reason)
+    budget = budget or GLOBAL_BUDGET
     call = caller or call_gemini
-    try:
-        text = call(prompt, api_key, model, timeout)
-    except concurrent.futures.TimeoutError:
-        raise AiError(f"AI 응답이 {int(timeout)}초 안에 오지 않았습니다.") from None
-    except Exception:
-        raise AiError("AI를 호출하지 못했습니다. 키·모델 이름·네트워크를 확인해 주세요.") from None
+    delays = (0, *RETRY_DELAYS)
+    busy: AiBusy | None = None
+    for attempt, delay in enumerate(delays):
+        if delay:
+            _sleep(delay)
+        reason = budget.try_acquire()
+        if reason:
+            if busy is not None:       # 재시도 중 전체 한도에 걸리면 마지막 일시적 오류로 끝낸다
+                raise busy
+            raise AiNotSent(reason)
+        try:
+            text = call(prompt, api_key, model, timeout)
+            break
+        except concurrent.futures.TimeoutError:
+            raise AiError(f"AI 응답이 {int(timeout)}초 안에 오지 않았습니다.") from None
+        except Exception as e:
+            err = explain_failure(e)
+            if isinstance(err, AiBusy) and attempt < len(delays) - 1:
+                busy = err
+                continue
+            raise err from None
     outcome = parse_response(text, request, plans)
     apply(plans, outcome)
     return outcome

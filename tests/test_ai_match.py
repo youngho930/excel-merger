@@ -142,7 +142,8 @@ def test_call_timeout(sc, plans):
 
 def test_missing_key_does_not_call(sc, plans):
     fake = Fake(correct_reply(plans))
-    with pytest.raises(AiError, match=ai_match.NO_AI_NOTICE):
+    # 엔진 문구는 원인만 말하고, "지금은 … 동의어 매칭만 사용 중"은 화면이 끝에 붙인다
+    with pytest.raises(AiError, match="AI 키\\(GEMINI_API_KEY\\)가 설정되지 않았습니다"):
         recommend(sc, plans, api_key=None, caller=fake)
     assert fake.prompts == []
 
