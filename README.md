@@ -1,6 +1,12 @@
 # 엑셀 자동 취합·검증기
 
+[![tests](https://github.com/youngho930/excel-merger/actions/workflows/tests.yml/badge.svg)](https://github.com/youngho930/excel-merger/actions/workflows/tests.yml)
+
+**라이브 데모: 배포 예정**
+
 부서·협력사·지점마다 양식이 제각각인 엑셀 파일을 하나로 모으고, 오류를 자동으로 찾아 표시하는 도구입니다.
+
+> 샘플의 회사명·인명은 모두 가상입니다. 실제 회사나 인물과 관계없습니다.
 
 ## 주요 기능
 
@@ -21,6 +27,8 @@
 Python 3.11 이상이 필요합니다.
 
 ```bash
+git clone https://github.com/youngho930/excel-merger.git
+cd excel-merger
 python -m venv .venv
 # Windows
 .venv\Scripts\activate
@@ -28,8 +36,24 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+```
+
+설정 파일을 예시에서 복사합니다. **값을 비워 둬도 됩니다** (AI 키가 없으면 동의어 매칭만 쓰고, 제한값은 로컬 기본값).
+
+```bash
+# Windows (PowerShell)
+Copy-Item .streamlit\secrets.toml.example .streamlit\secrets.toml
+# macOS / Linux
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+```
+
+`.streamlit/secrets.toml` 은 `.gitignore` 에 들어 있어 커밋되지 않습니다. 키를 넣었다면 이 파일을 다른 곳에 올리지 마세요.
+
+```bash
 streamlit run app.py
 ```
+
+브라우저에서 http://localhost:8501 이 열립니다.
 
 화면 없이 명령줄로도 실행할 수 있습니다 (실행 전 경고는 출력만 하고 그대로 진행).
 
@@ -104,15 +128,34 @@ columns:
 
 ## 제한 사항
 
+업로드·처리 제한은 `.streamlit/secrets.toml`(또는 환경변수)로 바꿀 수 있습니다. `EXCEL_MERGER_PROFILE = "cloud"` 한 줄을 넣으면 메모리 약 1GB인 **Streamlit Community Cloud 무료 서버용 보수적인 값**을 쓰고, 항목마다 따로 덮어쓸 수도 있습니다. 설정으로 엔진의 안전 상한(파일당 20MB, 50,000행, 50개)보다 크게 할 수는 없습니다.
+
+| 항목 (설정 이름) | 로컬 기본값 | `cloud` 프로필 |
+|---|---|---|
+| 한 번에 올리는 파일 수 (`MAX_FILES`) | 50개 | 10개 |
+| 파일 크기 (`MAX_FILE_MB`) | 파일당 20MB | 파일당 5MB |
+| 올리는 파일 합계 (`MAX_TOTAL_UPLOAD_MB`) | 100MB | 20MB |
+| 파일당 행 수 (`MAX_ROWS_PER_FILE`) | 50,000행 | 10,000행 |
+| 모든 파일 행 합계 (`MAX_TOTAL_ROWS`) | 200,000행 | 30,000행 |
+| 처리 시간 (`TIME_LIMIT_SECONDS`) | 단계마다 60초 | 45초 |
+| 동시 처리 작업 수 (`MAX_CONCURRENT_JOBS`) | 3 | 1 |
+| 작업별 메모리 상한 (`JOB_MEMORY_MB`, Linux만) | 없음 | 400MB |
+
+```toml
+# Streamlit Community Cloud 의 Secrets 칸 예시
+EXCEL_MERGER_PROFILE = "cloud"
+GEMINI_API_KEY = "여기에 키"   # 선택
+# MAX_FILES = 5                 # 개별 값만 바꾸고 싶을 때
+```
+
+그 밖의 고정 제한:
+
 | 항목 | 제한 |
 |---|---|
-| 한 번에 올리는 파일 수 | 최대 50개 |
-| 파일 크기 | 파일당 20MB (압축을 푼 크기·압축률도 검사) |
-| 행 수 | 파일당 50,000행, 모든 파일 합계 200,000행 |
-| 처리 시간 | 파일 읽기, 실행 단계마다 60초 (넘으면 중단하고 안내) |
+| 파일 내용 검사 | 압축을 푼 크기·압축률·시트 수 등 (압축 폭탄 방지) |
 | 오류목록 | 최대 20,000건 표시 |
 | 중복 행 고르기 | 화면에서 최대 50개 그룹 (나머지는 모든 행을 남김) |
-| AI 추천 호출 | 세션당 5회 |
+| AI 추천 호출 | 세션당 5회, 앱 전체 분당 10회·하루 200회. Google 쪽 일시적 오류(503·429)는 1초·3초 뒤 자동 재시도하고, 그렇게 끝난 시도는 세션 횟수에서 빼지 않습니다 |
 
 - 파일 형식은 `.xlsx`, `.xlsm` 입니다. `.xls` 는 엑셀에서 `.xlsx` 로 다시 저장해 주세요.
-- 업로드 칸의 일부 안내 문구("Upload", "20MB per file")는 Streamlit이 만드는 영어입니다.
+- 업로드 칸의 일부 안내 문구("Upload", "20MB per file")는 Streamlit이 만드는 영어입니다. `cloud` 프로필에서도 이 칸에는 20MB로 보이지만, 실제로는 앱이 5MB 제한을 검사하고 한국어로 안내합니다.

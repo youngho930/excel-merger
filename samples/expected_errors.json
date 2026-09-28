@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "note": "샘플의 회사명·인명은 모두 가상입니다. 실제 회사나 인물과 관계없습니다.",
   "scenarios": {
     "incoming_inspection": {
       "name": "협력사 수입검사 결과",

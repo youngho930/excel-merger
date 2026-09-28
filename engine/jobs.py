@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TIMEOUT = 60   # 초. 파일 읽기, 실행 단계마다 따로 적용한다
 
 OK, READ_ERROR, SCENARIO_ERROR, FAILED = "ok", "read_error", "scenario_error", "failed"
+MEMORY = "memory"
 
 
 class TimeLimitError(Exception):
@@ -41,9 +42,9 @@ class JobError(Exception):
 
 
 # ------------------------------------------------------------------ 작업 (자식 프로세스에서 실행)
-def _job_prepare(scenario, paths, header_rows=None):
+def _job_prepare(scenario, paths, header_rows=None, max_rows=None):
     from .merge import prepare
-    return prepare(scenario, paths, header_rows)
+    return prepare(scenario, paths, header_rows, max_rows=max_rows)
 
 
 def _job_execute(scenario, plans, out_dir, apply_suggestions=False):
@@ -70,18 +71,37 @@ def _job_env_names():
     return sorted(os.environ)
 
 
+def _job_alloc(mb):
+    """메모리 상한 확인용 (테스트). mb 만큼 실제로 잡아 본다."""
+    block = bytearray(mb * 1024 * 1024)
+    return len(block) // (1024 * 1024)
+
+
 JOBS = {
     "prepare": _job_prepare,
     "execute": _job_execute,
     "write": _job_write,
     "sleep": _job_sleep,
     "env_names": _job_env_names,
+    "alloc": _job_alloc,
 }
 
 
 # ------------------------------------------------------------------ 부모 쪽
 MAX_CONCURRENT_JOBS = 3
 _SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_JOBS)
+_SLOTS_SIZE = MAX_CONCURRENT_JOBS
+_SLOTS_LOCK = threading.Lock()
+MEMORY_LIMIT_SUPPORTED = sys.platform.startswith("linux")
+
+
+def set_max_concurrent(n: int) -> None:
+    """앱 전체에서 동시에 도는 작업 수를 바꾼다 (배포 환경별 제한). 이미 돌고 있는 작업은 원래 자리를 반납한다."""
+    global _SLOTS, _SLOTS_SIZE
+    n = max(int(n), 1)
+    with _SLOTS_LOCK:
+        if n != _SLOTS_SIZE:
+            _SLOTS, _SLOTS_SIZE = threading.BoundedSemaphore(n), n
 
 # 자식 프로세스에 넘기지 않는 환경변수: 이름에 이 말이 들어가면 뺀다 (보안 검토 D-7).
 # 자식은 신뢰할 수 없는 xlsx를 파싱하므로 API 키 같은 비밀값을 물려주지 않는다.
@@ -94,10 +114,12 @@ def child_env() -> dict[str, str]:
     return env
 
 
-def run_job(name: str, *args: Any, timeout: float = DEFAULT_TIMEOUT) -> Any:
+def run_job(name: str, *args: Any, timeout: float = DEFAULT_TIMEOUT, memory_mb: int = 0) -> Any:
     """작업 하나를 하위 프로세스에서 실행하고 결과를 돌려준다.
 
     - 제한 시간을 넘기면 프로세스를 끝내고 TimeLimitError
+    - memory_mb > 0 이면 자식의 메모리를 그만큼으로 제한한다 (Linux만). 넘으면 JobError.
+      작업 하나가 서버 메모리를 다 써서 앱 전체가 죽는 대신 그 작업만 안내와 함께 끝난다.
     - 엔진이 낸 ReadError·ScenarioError는 같은 종류·같은 한국어 메시지로 다시 낸다
     - 그 밖의 실패는 JobError (내부 정보 없음)
     """
@@ -106,14 +128,15 @@ def run_job(name: str, *args: Any, timeout: float = DEFAULT_TIMEOUT) -> Any:
 
     if name not in JOBS:
         raise ValueError(f"알 수 없는 작업: {name}")
-    payload = pickle.dumps((name, args), protocol=pickle.HIGHEST_PROTOCOL)
+    payload = pickle.dumps((name, args, int(memory_mb or 0)), protocol=pickle.HIGHEST_PROTOCOL)
     kwargs: dict[str, Any] = {}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     env = child_env()
     # 앱 전체에서 동시에 도는 작업 수를 제한한다. 기다리는 시간도 제한 시간에 포함한다 (보안 검토 D-8)
     started = time.monotonic()
-    if not _SLOTS.acquire(timeout=timeout):
+    slots = _SLOTS   # set_max_concurrent()로 바뀌어도 잡은 자리는 같은 곳에 반납한다
+    if not slots.acquire(timeout=timeout):
         raise TimeLimitError(
             f"지금 처리 중인 작업이 많아 {_seconds(timeout)}초 안에 시작하지 못했습니다. 잠시 후 다시 시도해 주세요.")
     try:
@@ -128,7 +151,7 @@ def run_job(name: str, *args: Any, timeout: float = DEFAULT_TIMEOUT) -> Any:
     except OSError:
         raise JobError("처리 프로그램을 시작하지 못했습니다. 잠시 후 다시 시도해 주세요.") from None
     finally:
-        _SLOTS.release()
+        slots.release()
 
     try:
         status, value = pickle.loads(proc.stdout) if proc.stdout else (FAILED, None)
@@ -140,6 +163,9 @@ def run_job(name: str, *args: Any, timeout: float = DEFAULT_TIMEOUT) -> Any:
         raise ReadError(value)
     if status == SCENARIO_ERROR:
         raise ScenarioError(value)
+    if status == MEMORY:
+        raise JobError(f"파일을 처리하는 데 메모리가 부족합니다(작업당 최대 {memory_mb}MB). "
+                       "파일 수를 줄이거나 파일을 나눠서 다시 시도해 주세요.")
     if proc.returncode not in (0, 1) and status == FAILED:
         # 메모리 부족 등으로 운영체제가 프로세스를 끝낸 경우 (Linux: 음수 = 시그널)
         raise JobError("파일을 처리하는 중 작업이 강제로 끝났습니다. 파일이 너무 크거나 복잡할 수 있습니다. "
@@ -152,6 +178,17 @@ def _seconds(t: float) -> str:
 
 
 # ------------------------------------------------------------------ 자식 쪽
+def _limit_memory(mb: int) -> None:
+    """이 프로세스의 데이터 메모리(힙·익명 mmap)를 제한한다 (Linux).
+
+    RLIMIT_AS(가상 주소 공간 전체)는 공유 라이브러리 매핑까지 세서 파이썬 시작만으로 걸릴 수 있으므로
+    실제로 잡는 메모리에 가까운 RLIMIT_DATA 를 쓴다. 넘으면 파이썬이 MemoryError 를 낸다.
+    """
+    import resource
+    limit = mb * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_DATA, (limit, limit))
+
+
 def _child_main() -> int:
     from .reader import ReadError
     from .scenario import ScenarioError
@@ -159,9 +196,13 @@ def _child_main() -> int:
     out = sys.stdout.buffer
     sys.stdout = sys.stderr   # 혹시 누가 print해도 결과(pickle)가 섞이지 않게
     try:
-        name, args = pickle.loads(sys.stdin.buffer.read())
+        name, args, memory_mb = pickle.loads(sys.stdin.buffer.read())
+        if memory_mb and MEMORY_LIMIT_SUPPORTED:
+            _limit_memory(memory_mb)
         reply = (OK, JOBS[name](*args))
         code = 0
+    except MemoryError:
+        reply, code = (MEMORY, None), 1
     except ReadError as e:
         reply, code = (READ_ERROR, str(e)), 1
     except ScenarioError as e:

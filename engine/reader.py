@@ -179,6 +179,8 @@ def _open_workbook(path: Path):
         return load_workbook(path, read_only=True, data_only=True)
     except (zipfile.BadZipFile, KeyError, OSError, ValueError, TypeError):
         raise ReadError(f"'{path.name}'을 엑셀 파일로 열 수 없습니다. 파일이 손상되었거나 암호가 걸려 있을 수 있습니다.") from None
+    except MemoryError:
+        raise
     except Exception:  # openpyxl 내부 예외 종류가 다양하다
         raise ReadError(f"'{path.name}'을 엑셀 파일로 열 수 없습니다.") from None
 
@@ -234,11 +236,11 @@ def _has_data_after(path: Path, ws, last_row: int) -> bool:
     return False
 
 
-def _read_data(ws, header_row: int, width: int, path: Path) -> list[SourceRow]:
+def _read_data(ws, header_row: int, width: int, path: Path, max_rows: int = MAX_ROWS) -> list[SourceRow]:
     """머리글 다음 행부터 읽는다. 열은 width까지만, 행·칸 수는 한도까지만."""
     width = max(width, 1)
-    last_allowed = header_row + MAX_ROWS
-    if MAX_ROWS * width > MAX_CELLS:
+    last_allowed = header_row + max_rows
+    if max_rows * width > MAX_CELLS:
         last_allowed = header_row + MAX_CELLS // width
     out: list[SourceRow] = []
     for offset, row in enumerate(ws.iter_rows(min_row=header_row + 1, max_row=last_allowed,
@@ -248,15 +250,16 @@ def _read_data(ws, header_row: int, width: int, path: Path) -> list[SourceRow]:
         out.append(SourceRow(excel_row=header_row + 1 + offset,
                              cells=tuple(row) + (None,) * (width - len(row))))
     if _has_data_after(path, ws, last_allowed):
-        limit = min(MAX_ROWS, MAX_CELLS // width)
+        limit = min(max_rows, MAX_CELLS // width)
         raise ReadError(f"'{ws.title}' 시트의 데이터가 너무 많습니다 (열 {width}개 기준 최대 {limit:,}행).")
     return out
 
 
 def read_table(path: str | Path, scenario: Scenario, header_row: int | None = None,
-               sheet: str | None = None) -> SourceTable:
+               sheet: str | None = None, max_rows: int | None = None) -> SourceTable:
     """엑셀 파일 하나를 읽는다.
 
+    max_rows: 데이터 최대 행 수 (배포 환경별 제한). MAX_ROWS보다 크게 할 수는 없다.
     header_row를 주면 그 행을 머리글로 쓰고, 없으면 자동으로 찾는다.
     sheet를 주지 않으면 머리글 점수가 가장 높은 시트를 쓴다(동점이면 앞 시트).
     머리글 탐지는 시트마다 위쪽 몇 행만 읽고, 고른 시트 하나만 끝까지 읽는다.
@@ -287,8 +290,8 @@ def read_table(path: str | Path, scenario: Scenario, header_row: int | None = No
 
         # 열 너비: 위쪽에서 본 가장 넓은 행 기준 (그보다 오른쪽 칸은 머리글이 없어 읽지 않는다)
         width = max((len(r) for r in top), default=0)
-        rows = _read_data(ws, hr, width, path)
-    except ReadError:
+        rows = _read_data(ws, hr, width, path, min(max_rows or MAX_ROWS, MAX_ROWS))
+    except (ReadError, MemoryError):   # 메모리 부족은 "손상된 파일"이 아니다 (jobs 가 따로 안내)
         raise
     except Exception:
         # read_only 모드는 시트를 읽을 때 비로소 XML을 해석한다. 손상된 파일의 내부 예외를

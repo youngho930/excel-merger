@@ -22,6 +22,8 @@ SAMPLES = ROOT / "samples"
 
 BLANK = None  # 빈칸 오류를 나타내는 값
 
+FICTION_NOTE = "샘플의 회사명·인명은 모두 가상입니다. 실제 회사나 인물과 관계없습니다."
+
 # 오류 종류 (CLAUDE.md "검증 종류"와 같은 이름)
 REQUIRED = "필수값 빈칸"
 FORMAT = "형식 오류"
@@ -291,7 +293,7 @@ def build_stock(rng):
         [("실사일", "실사일자"), ("창고", "창고명"), ("품목코드", "품목코드"), ("품목명", "자재명"),
          ("단위", "단위"), ("전산수량", "장부수량"), ("실사수량", "실재고"), ("실사자", "담당자")],
         ["실사일"], korean,
-        stock_rows(rng, "부산물류센터", ["정우성", "한지민"], 16, date(2026, 9, 27)),
+        stock_rows(rng, "부산물류센터", ["윤서진", "오민재"], 16, date(2026, 9, 27)),
         title_lines=["(주)한빛정밀 부산물류센터 재고실사표", "실사기준일: 2026-09-27   승인: 물류팀장"],
     )
     c.plant(3, "실사자", BLANK, REQUIRED, "필수 열 '실사자'가 비어 있음")
@@ -397,6 +399,8 @@ def write_answer_key(results):
         "",
         "> 이 파일은 `scripts/make_samples.py`가 샘플과 함께 자동으로 만듭니다. 직접 고치지 말고 스크립트를 고친 뒤 다시 실행하세요.",
         "",
+        f"> {FICTION_NOTE}",
+        "",
         "- **행 번호**는 엑셀 화면에 보이는 실제 행 번호입니다 (머리글 행이 3행인 파일은 데이터가 4행부터 시작).",
         "- **열 이름**은 그 파일에 실제로 쓰인 이름이고, 괄호 안은 시나리오의 기준명입니다.",
         "- **중복 행**은 뒤에 나온 행을 오류로 적고, 설명에 먼저 나온 행을 적었습니다. 엔진이 두 행 모두 표시해도 정답으로 봅니다.",
@@ -448,7 +452,7 @@ def json_value(v):
 
 def write_answer_json(results):
     """테스트가 자동으로 대조하는 정답지. .md와 같은 기록에서 만든다."""
-    data = {"version": 1, "scenarios": {}}
+    data = {"version": 1, "note": FICTION_NOTE, "scenarios": {}}
     for folder, title, files in results:
         errors = []
         for f in files:

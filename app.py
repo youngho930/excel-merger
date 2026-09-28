@@ -23,26 +23,46 @@ import yaml
 
 from engine import KINDS, ReadError, ScenarioError, list_scenarios, pre_run_warnings
 from engine import ai_match
-from engine.jobs import DEFAULT_TIMEOUT, JobError, TimeLimitError, run_job
+from engine import limits as limits_mod
+from engine.jobs import JobError, TimeLimitError, run_job, set_max_concurrent
 from engine.matching import AI, USER
-from engine.merge import MAX_FILES
 from engine.normalize import display
-from engine.reader import EXCEL_SUFFIXES, MAX_FILE_BYTES, MAX_ROWS
+from engine.reader import EXCEL_SUFFIXES
 from engine.writer import ACTION_COL, ERROR_COLS
 
 ROOT = Path(__file__).resolve().parent
 SCENARIO_DIR = ROOT / "scenarios"
 SAMPLE_DIR = ROOT / "samples"
 
-# ---- 제한 (화면 단계)
-TIME_LIMIT = DEFAULT_TIMEOUT          # 초. 파일 읽기, 실행 단계마다
-MAX_TOTAL_ROWS = 200_000              # 모든 파일의 데이터 행 합계
+
+
+def setting_values(names) -> dict[str, Any]:
+    """st.secrets 에서 names 만 골라 dict 로. 설정 파일이 없어도 오류 없이 빈 dict."""
+    found: dict[str, Any] = {}
+    try:
+        for name in names:
+            if name in st.secrets:
+                found[name] = st.secrets[name]
+    except Exception:
+        return {}
+    return found
+
+
+# ---- 제한: secrets -> 환경변수 -> 프로필 기본값 (engine/limits.py). EXCEL_MERGER_PROFILE="cloud" 면 보수적인 값
+LIMITS, LIMIT_NOTES = limits_mod.load_limits(setting_values(limits_mod.SETTING_NAMES))
+set_max_concurrent(LIMITS.max_concurrent_jobs)
+TIME_LIMIT = LIMITS.time_limit_seconds          # 초. 파일 읽기, 실행 단계마다
+MAX_FILES = LIMITS.max_files                    # 한 번에 올리는 파일 수
+MAX_FILE_BYTES = LIMITS.max_file_bytes          # 파일당 크기
+MAX_ROWS = LIMITS.max_rows_per_file             # 파일당 데이터 행 수
+MAX_TOTAL_ROWS = LIMITS.max_total_rows          # 모든 파일의 데이터 행 합계
+MAX_TOTAL_UPLOAD_BYTES = LIMITS.max_total_upload_bytes   # 한 번에 올리는 파일 크기 합계
+JOB_MEMORY_MB = LIMITS.job_memory_mb            # 처리 작업 하나의 메모리 상한 (Linux만, 0이면 없음)
 MB = 1024 * 1024
 SESSION_ROOT = Path(tempfile.gettempdir()) / "excel-merger-sessions"
 STALE_SECONDS = 6 * 3600              # 이보다 오래 쓰지 않은 세션 폴더는 지운다
 MAX_DUP_GROUPS_SHOWN = 50             # 화면에서 남길 행을 고를 수 있는 중복 그룹 수
 DEMO_MANIFEST = "demo.yaml"           # samples/<폴더>/demo.yaml 이 있으면 AI 매칭 체험 폴더
-MAX_TOTAL_UPLOAD_BYTES = 100 * MB     # 한 번에 올리는 파일 크기 합계
 MAX_KEPT_OUTPUTS = 2                  # 세션마다 남겨 두는 결과 파일 수 (나머지는 지운다)
 
 NO_SOURCE = "(선택 안 함)"
@@ -258,7 +278,8 @@ def load_files(scenario, items: list[tuple[str, Any]], source: str) -> None:
 
     try:
         with st.spinner("파일을 읽고 열을 맞추는 중입니다…"):
-            plans = run_job("prepare", scenario, paths, timeout=TIME_LIMIT)
+            plans = run_job("prepare", scenario, paths, None, MAX_ROWS,
+                            timeout=TIME_LIMIT, memory_mb=JOB_MEMORY_MB)
     except TimeLimitError as e:
         say("error", f"처리 시간 제한에 걸렸습니다. {e}")
         return
@@ -331,14 +352,7 @@ def on_map_change(fi: int, standard: str, key: str) -> None:
 
 def ai_settings() -> tuple[str | None, str]:
     """(키, 모델). st.secrets -> 환경변수. 설정 파일이 없어도 오류 없이 넘어간다."""
-    secrets: dict[str, Any] = {}
-    try:
-        for name in (ai_match.KEY_NAME, ai_match.MODEL_KEY_NAME):
-            if name in st.secrets:
-                secrets[name] = st.secrets[name]
-    except Exception:
-        secrets = {}
-    return ai_match.get_settings(secrets)
+    return ai_match.get_settings(setting_values((ai_match.KEY_NAME, ai_match.MODEL_KEY_NAME)))
 
 
 def run_ai(scenario, api_key: str, model: str, with_examples: bool) -> None:
@@ -530,7 +544,8 @@ def run_merge(scenario) -> None:
     applied = bool(ss.apply_pref)
     try:
         with st.spinner("오류를 검사하고 결과 파일을 만드는 중입니다…"):
-            result, path = run_job("execute", scenario, ss.plans, out_dir(), applied, timeout=TIME_LIMIT)
+            result, path = run_job("execute", scenario, ss.plans, out_dir(), applied,
+                                   timeout=TIME_LIMIT, memory_mb=JOB_MEMORY_MB)
     except TimeLimitError as e:
         say("error", f"처리 시간 제한에 걸렸습니다. {e}")
         return
@@ -557,7 +572,8 @@ def output_for(res) -> Path | None:
         try:
             with st.spinner("결과 파일을 만드는 중입니다…"):
                 ss.outputs[key] = str(run_job("write", ss.result, out_dir(), res.apply_suggestions,
-                                              sorted(res.excluded), timeout=TIME_LIMIT))
+                                              sorted(res.excluded), timeout=TIME_LIMIT,
+                                              memory_mb=JOB_MEMORY_MB))
         except TimeLimitError as e:
             st.error(md(f"처리 시간 제한에 걸렸습니다. {e}"))
             return None
@@ -706,8 +722,11 @@ def main() -> None:
 
     # ---- 2. 업로드
     st.subheader("2. 엑셀 파일 올리기")
-    st.caption(f"제한: 한 번에 최대 {MAX_FILES}개 · 파일당 {MAX_FILE_BYTES // MB}MB · 파일당 {MAX_ROWS:,}행 · "
+    st.caption(f"제한: 한 번에 최대 {MAX_FILES}개 · 파일당 {MAX_FILE_BYTES // MB}MB · "
+               f"합계 {MAX_TOTAL_UPLOAD_BYTES // MB}MB · 파일당 {MAX_ROWS:,}행 · "
                f"모든 파일 합계 {MAX_TOTAL_ROWS:,}행 · 단계마다 처리 시간 {TIME_LIMIT}초")
+    for note in LIMIT_NOTES:   # 관리자 설정(secrets·환경변수)이 잘못된 경우
+        st.caption(f"설정 안내: {md(note)}")
     uploads = st.file_uploader("취합할 엑셀 파일(.xlsx)을 모두 골라 올려 주세요.", type=["xlsx", "xlsm"],
                                accept_multiple_files=True, key=f"uploader_{ss.uploader_n}")
     sig = tuple((u.file_id, u.name, u.size) for u in uploads) if uploads else None

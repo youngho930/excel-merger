@@ -157,15 +157,18 @@ class MergeResult:
 
 
 def prepare(scenario: Scenario, paths: list[str | Path],
-            header_rows: dict[str, int] | None = None) -> list[FilePlan]:
-    """파일들을 읽고 열을 매칭한다. 파일 순서는 주어진 순서를 그대로 쓴다."""
+            header_rows: dict[str, int] | None = None, max_rows: int | None = None) -> list[FilePlan]:
+    """파일들을 읽고 열을 매칭한다. 파일 순서는 주어진 순서를 그대로 쓴다.
+
+    max_rows: 파일당 데이터 최대 행 수 (배포 환경별 제한, 없으면 엔진 기본값).
+    """
     header_rows = header_rows or {}
     if len(paths) > MAX_FILES:
         raise ReadError(f"한 번에 취합할 수 있는 파일은 최대 {MAX_FILES}개입니다.")
     plans = []
     for p in paths:
         p = Path(p)
-        table = read_table(p, scenario, header_row=header_rows.get(p.name))
+        table = read_table(p, scenario, header_row=header_rows.get(p.name), max_rows=max_rows)
         plans.append(FilePlan(table=table, match=match_columns(table, scenario)))
     return plans
 
