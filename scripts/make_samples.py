@@ -118,12 +118,11 @@ class SampleFile:
         wb = Workbook()
         ws = wb.active
         ws.title = self.sheet
+        # 서식은 모든 행을 append한 뒤에 준다. 먼저 셀을 건드리면 빈 1행이 생겨
+        # 머리글이 한 줄 밀리고 정답지 행 번호와 어긋난다.
         for line in self.title_lines:
             ws.append([line])
-        ws.cell(row=1, column=1).font = Font(bold=bool(self.title_lines), size=14 if self.title_lines else 11)
         ws.append([name for _, name in self.headers])
-        for cell in ws[self.header_row]:
-            cell.font = Font(bold=True)
         for row in self.rows:
             values = []
             for key, _ in self.headers:
@@ -132,6 +131,10 @@ class SampleFile:
                     v = self.date_fmt(v)
                 values.append(v)
             ws.append(values)
+        if self.title_lines:
+            ws.cell(row=1, column=1).font = Font(bold=True, size=14)
+        for cell in ws[self.header_row]:
+            cell.font = Font(bold=True)
         for col_cells in ws.iter_cols(min_row=self.header_row):
             for cell in col_cells:
                 if isinstance(cell.value, datetime):
@@ -336,7 +339,7 @@ def build_monthly(rng):
 
     b = SampleFile(
         "월간실적_생산팀.xlsx", "8월실적",
-        [("부서", "팀명"), ("월", "기준월"), ("항목", "KPI"), ("목표", "Target"), ("실적", "Actual"), ("비고", "Remark")],
+        [("월", "기준월"), ("항목", "KPI"), ("부서", "팀명"), ("실적", "Actual"), ("목표", "Target"), ("비고", "Remark")],
         ["월"], month_dash, monthly_rows(rng, "생산팀", month),
         title_lines=["2026년 8월 부서별 월간 실적 보고", "제출부서: 생산팀   제출일: 2026-09-03"],
     )
