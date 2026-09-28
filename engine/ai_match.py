@@ -39,11 +39,58 @@ MAX_EXAMPLE_CHARS = 40
 MAX_RESPONSE_CHARS = 100_000
 NO_AI_NOTICE = "AI 없이 동의어 매칭만 사용 중"
 
+# 한 번 호출의 크기 상한 (보안 검토 D-5: 파일 50개 x 200열 + 예시값이면 160만 자까지 커졌음)
+MAX_AI_FILES = 10          # 요청에 넣는 파일 수
+MAX_AI_COLUMNS = 50        # 파일마다 넣는 원본 열 수
+MAX_PROMPT_CHARS = 20_000  # 넘으면 보내지 않는다
+# 앱 전체(모든 세션)가 함께 쓰는 한도. 세션당 5회는 새 탭으로 우회할 수 있으므로 키 주인의 할당량을 지킨다
+GLOBAL_PER_MINUTE = 10
+GLOBAL_PER_DAY = 200
+
 Caller = Callable[[str, str, str, float], str]
 
 
 class AiError(Exception):
     """AI 추천을 받지 못했을 때. 메시지는 한국어이고 내부 정보(키·주소·스택)를 넣지 않는다."""
+
+
+class AiNotSent(AiError):
+    """보내기 전에 멈춘 경우 (키 없음, 물어볼 열 없음, 요청이 너무 큼, 전체 한도). 세션 호출 횟수에 넣지 않는다."""
+
+
+class CallBudget:
+    """앱 전체가 함께 쓰는 AI 호출 한도 (분당·하루). 스레드 안전.
+
+    Streamlit 서버는 한 프로세스에서 여러 세션을 돌리므로, 모듈에 하나 둔 GLOBAL_BUDGET 을 모든 세션이 공유한다.
+    """
+
+    def __init__(self) -> None:
+        import threading
+        from collections import deque
+        self._lock = threading.Lock()
+        self._calls = deque()
+
+    def try_acquire(self, now: float | None = None) -> str | None:
+        """한도 안이면 호출 1회를 기록하고 None, 넘으면 한국어 이유."""
+        import time
+        now = time.time() if now is None else now
+        with self._lock:
+            while self._calls and now - self._calls[0] > 86_400:
+                self._calls.popleft()
+            if len(self._calls) >= GLOBAL_PER_DAY:
+                return f"오늘 앱 전체의 AI 호출 한도({GLOBAL_PER_DAY}회)를 다 썼습니다."
+            recent = sum(1 for t in self._calls if now - t < 60)
+            if recent >= GLOBAL_PER_MINUTE:
+                return "지금 AI 요청이 많습니다. 1분 뒤에 다시 시도해 주세요."
+            self._calls.append(now)
+            return None
+
+    def reset(self) -> None:
+        with self._lock:
+            self._calls.clear()
+
+
+GLOBAL_BUDGET = CallBudget()
 
 
 @dataclass(frozen=True)
@@ -107,9 +154,11 @@ def build_request(scenario, plans, with_examples: bool = False) -> dict[str, Any
     for fi, plan in enumerate(plans):
         m = plan.match
         missing = [cm.standard for cm in m.matches if cm.source_index is None]
-        free = m.unmatched_sources
+        free = m.unmatched_sources[:MAX_AI_COLUMNS]
         if not missing or not free:
             continue
+        if len(files) >= MAX_AI_FILES:
+            break
         standards = []
         for name in missing:
             s: dict[str, Any] = {"name": name, "format": spec[name].fmt}
@@ -124,6 +173,13 @@ def build_request(scenario, plans, with_examples: bool = False) -> dict[str, Any
             columns.append(c)
         files.append({"file": f"F{fi + 1}", "standards": standards, "columns": columns})
     return {"files": files}
+
+
+def request_is_trimmed(plans) -> bool:
+    """build_request 가 파일 수·열 수 상한 때문에 일부를 빼는지."""
+    needing = [p for p in plans
+               if p.match.unmatched_sources and any(cm.source_index is None for cm in p.match.matches)]
+    return len(needing) > MAX_AI_FILES or any(len(p.match.unmatched_sources) > MAX_AI_COLUMNS for p in needing)
 
 
 def preview_text(request: dict[str, Any]) -> str:
@@ -238,16 +294,26 @@ def apply(plans, outcome: AiOutcome) -> int:
 # ------------------------------------------------------------------ 한 번에
 def recommend(scenario, plans, *, api_key: str | None, model: str = DEFAULT_MODEL,
               with_examples: bool = False, caller: Caller | None = None,
-              timeout: float = CALL_TIMEOUT_SECONDS) -> AiOutcome:
-    """요청 만들기 -> 호출 -> 검증 -> 확인표에 채우기. 실패하면 AiError (확인표는 그대로)."""
+              timeout: float = CALL_TIMEOUT_SECONDS, budget: CallBudget | None = None) -> AiOutcome:
+    """요청 만들기 -> 크기·전체 한도 확인 -> 호출 -> 검증 -> 확인표에 채우기.
+
+    실패하면 AiError (확인표는 그대로). 보내기 전에 멈춘 경우는 AiNotSent.
+    """
     if not api_key:
-        raise AiError(f"AI 키(GEMINI_API_KEY)가 설정되지 않았습니다. {NO_AI_NOTICE}입니다.")
+        raise AiNotSent(f"AI 키(GEMINI_API_KEY)가 설정되지 않았습니다. {NO_AI_NOTICE}입니다.")
     request = build_request(scenario, plans, with_examples)
     if not request["files"]:
-        raise AiError("AI에게 물어볼 열이 없습니다. 모든 기준열 또는 원본 열이 이미 매칭돼 있습니다.")
+        raise AiNotSent("AI에게 물어볼 열이 없습니다. 모든 기준열 또는 원본 열이 이미 매칭돼 있습니다.")
+    prompt = build_prompt(request)
+    if len(prompt) > MAX_PROMPT_CHARS:
+        raise AiNotSent(f"AI에게 보낼 내용이 너무 깁니다({len(prompt):,}자, 최대 {MAX_PROMPT_CHARS:,}자). "
+                        "'예시값 함께 보내기'를 끄거나 파일 수를 줄여 주세요.")
+    reason = (budget or GLOBAL_BUDGET).try_acquire()
+    if reason:
+        raise AiNotSent(reason)
     call = caller or call_gemini
     try:
-        text = call(build_prompt(request), api_key, model, timeout)
+        text = call(prompt, api_key, model, timeout)
     except concurrent.futures.TimeoutError:
         raise AiError(f"AI 응답이 {int(timeout)}초 안에 오지 않았습니다.") from None
     except Exception:

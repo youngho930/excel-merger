@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import time
@@ -41,6 +42,8 @@ SESSION_ROOT = Path(tempfile.gettempdir()) / "excel-merger-sessions"
 STALE_SECONDS = 6 * 3600              # 이보다 오래 쓰지 않은 세션 폴더는 지운다
 MAX_DUP_GROUPS_SHOWN = 50             # 화면에서 남길 행을 고를 수 있는 중복 그룹 수
 DEMO_MANIFEST = "demo.yaml"           # samples/<폴더>/demo.yaml 이 있으면 AI 매칭 체험 폴더
+MAX_TOTAL_UPLOAD_BYTES = 100 * MB     # 한 번에 올리는 파일 크기 합계
+MAX_KEPT_OUTPUTS = 2                  # 세션마다 남겨 두는 결과 파일 수 (나머지는 지운다)
 
 NO_SOURCE = "(선택 안 함)"
 
@@ -83,28 +86,46 @@ def init_state() -> None:
             ss[k] = v
 
 
-def _cleanup_stale() -> None:
-    now = time.time()
+def _last_used(d: Path) -> float:
+    """세션 폴더를 마지막으로 쓴 시각: 폴더와 그 안 모든 파일·폴더의 mtime 중 가장 최근.
+
+    하위 폴더(out/)에 파일을 써도 세션 폴더 자체의 mtime은 바뀌지 않으므로 안쪽까지 본다 (보안 검토 D-4).
+    """
+    newest = d.stat().st_mtime
+    for p in d.rglob("*"):
+        try:
+            newest = max(newest, p.stat().st_mtime)
+        except OSError:
+            pass
+    return newest
+
+
+def cleanup_stale(now: float | None = None) -> None:
+    now = time.time() if now is None else now
     try:
         entries = list(SESSION_ROOT.iterdir())
     except OSError:
         return
     for d in entries:
         try:
-            if d.is_dir() and now - d.stat().st_mtime > STALE_SECONDS:
+            if d.is_dir() and now - _last_used(d) > STALE_SECONDS:
                 shutil.rmtree(d, ignore_errors=True)
         except OSError:
             pass
 
 
 def workspace() -> Path:
-    """이 세션만 쓰는 임시 폴더."""
+    """이 세션만 쓰는 임시 폴더. 부를 때마다 사용 시각을 갱신한다."""
     ws = st.session_state.get("workspace")
     if ws is None or not Path(ws).is_dir():
         SESSION_ROOT.mkdir(parents=True, exist_ok=True)
-        _cleanup_stale()
+        cleanup_stale()
         ws = tempfile.mkdtemp(prefix="s_", dir=SESSION_ROOT)
         st.session_state.workspace = ws
+    try:
+        os.utime(ws)
+    except OSError:
+        pass
     return Path(ws)
 
 
@@ -128,15 +149,65 @@ def say(kind: str, text: str) -> None:
 
 
 def show_messages() -> None:
+    # 안내에는 파일 이름·열 이름이 들어갈 수 있으므로 마크다운으로 해석되지 않게 한다
     for kind, text in st.session_state.messages:
-        getattr(st, kind)(text)
+        getattr(st, kind)(md(text))
     st.session_state.messages = []
 
 
+# ================================================================== 사용자 문자열 표시
+_MD_SPECIAL = set("\\`*_{}[]()#+-.!:<>|~$=")
+
+
+def md(text: Any) -> str:
+    """파일 이름·열 이름처럼 업로드된 파일에서 온 글자를 마크다운 요소(st.markdown, st.warning,
+    st.caption, 위젯 라벨 등)에 넣기 전에 이스케이프한다.
+
+    이스케이프하지 않으면 열 이름에 적힌 ![](외부 주소) 이미지가 열람자 브라우저에서 불러와지고,
+    [링크](주소)나 :red-background[가짜 공지]가 앱 화면 안에 그려진다 (보안 검토 D-1).
+    """
+    s = " ".join(str(text).split("\n"))
+    return "".join("\\" + ch if ch in _MD_SPECIAL else ch for ch in s)
+
+
 # ================================================================== 파일 불러오기
+_BAD_NAME_CHARS = set('<>:"/\\|?*') | {chr(i) for i in range(32)}
+_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+MAX_NAME_BYTES = 150       # 디스크에 저장할 파일 이름의 최대 UTF-8 바이트 (Linux 한도 255)
+
+
 def safe_name(name: str) -> str:
     """업로드 파일 이름에서 폴더 부분을 떼어 낸다 (Windows 구분자 '\\'도 처리)."""
     return Path(PurePosixPath(name.replace("\\", "/")).name).name
+
+
+def disk_name(name: str) -> str:
+    """safe_name 결과를 Windows·Linux 모두에서 저장할 수 있는 이름으로 바꾼다 (보안 검토 D-2).
+
+    금지 문자(< > : " / \\ | ? * 제어문자)는 '_'로, 끝의 점·공백은 제거, 예약 이름(CON 등)은 앞에 '_',
+    이름이 너무 길면(UTF-8 150바이트) 줄인다. 확장자는 유지한다.
+    """
+    p = Path(name)
+    suffix = p.suffix
+    stem = "".join("_" if ch in _BAD_NAME_CHARS else ch for ch in p.stem).rstrip(" .") or "파일"
+    if stem.split(".")[0].upper() in _RESERVED:
+        stem = "_" + stem
+    limit = MAX_NAME_BYTES - len(suffix.encode("utf-8"))
+    while len(stem.encode("utf-8")) > limit:
+        stem = stem[:-1]
+    return stem + suffix
+
+
+def upload_batch_error(sizes: list[int]) -> str | None:
+    """업로드 목록을 메모리로 읽기 전에 개수·전체 크기를 검사한다 (보안 검토 D-10)."""
+    if len(sizes) > MAX_FILES:
+        return (f"파일 수 제한에 걸렸습니다: 한 번에 최대 {MAX_FILES}개까지 올릴 수 있습니다 "
+                f"(올린 파일 {len(sizes)}개).")
+    total = sum(sizes)
+    if total > MAX_TOTAL_UPLOAD_BYTES:
+        return (f"전체 크기 제한에 걸렸습니다: 올린 파일이 합계 {total / MB:.1f}MB입니다 "
+                f"(한 번에 최대 {MAX_TOTAL_UPLOAD_BYTES // MB}MB).")
+    return None
 
 
 def load_files(scenario, items: list[tuple[str, Any]], source: str) -> None:
@@ -151,6 +222,8 @@ def load_files(scenario, items: list[tuple[str, Any]], source: str) -> None:
     names: list[str] = []
     for name, data in items:
         n = safe_name(name)
+        if n and n not in (".", ".."):
+            n = disk_name(n)
         if not n or n in (".", ".."):
             say("error", "파일 이름을 알 수 없는 파일이 있습니다. 이름을 바꿔 다시 올려 주세요.")
             return
@@ -162,7 +235,8 @@ def load_files(scenario, items: list[tuple[str, Any]], source: str) -> None:
             say("error", f"파일 크기 제한에 걸렸습니다: '{n}'은 {size / MB:.1f}MB입니다 "
                          f"(파일당 최대 {MAX_FILE_BYTES // MB}MB).")
             return
-        if n in names:
+        # Windows는 대소문자만 다른 이름을 같은 파일로 저장하므로 대소문자를 무시하고 비교한다 (보안 검토 D-6)
+        if n.casefold() in {x.casefold() for x in names}:
             say("error", f"같은 이름의 파일 '{n}'이 두 개 있습니다. 한 파일의 이름을 바꿔 다시 올려 주세요.")
             return
         names.append(n)
@@ -172,10 +246,14 @@ def load_files(scenario, items: list[tuple[str, Any]], source: str) -> None:
     paths = []
     for n, (_, data) in zip(names, items):
         dest = in_dir / n
-        if isinstance(data, (bytes, bytearray)):
-            dest.write_bytes(data)
-        else:
-            shutil.copyfile(data, dest)   # 샘플 원본은 건드리지 않고 복사본을 쓴다
+        try:
+            if isinstance(data, (bytes, bytearray)):
+                dest.write_bytes(data)
+            else:
+                shutil.copyfile(data, dest)   # 샘플 원본은 건드리지 않고 복사본을 쓴다
+        except OSError:
+            say("error", f"'{n}' 파일을 저장하지 못했습니다. 파일 이름을 짧고 단순하게 바꿔 다시 올려 주세요.")
+            return
         paths.append(dest)
 
     try:
@@ -271,6 +349,8 @@ def run_ai(scenario, api_key: str, model: str, with_examples: bool) -> None:
             outcome = ai_match.recommend(scenario, ss.plans, api_key=api_key, model=model,
                                          with_examples=with_examples)
     except ai_match.AiError as e:
+        if isinstance(e, ai_match.AiNotSent):
+            ss.ai_calls -= 1   # 실제로 보내지 않았으면 세션 횟수에 넣지 않는다
         ss.ai_message = ("warning", f"AI 추천을 받지 못했습니다. {e} 지금은 {ai_match.NO_AI_NOTICE}입니다.")
         return
     # 채운 추천을 드롭다운에도 반영 (드롭다운은 이 아래에서 그려지므로 지금 바꿔도 된다)
@@ -307,7 +387,10 @@ def render_ai(scenario) -> None:
             what = ("매칭 안 된 기준열 이름과 원본 열 이름, 원본 열마다 예시값 "
                     f"{ai_match.EXAMPLES_PER_COLUMN}개" if with_examples
                     else "매칭 안 된 기준열 이름과 원본 열 이름만 (데이터 값은 보내지 않음)")
-            st.caption(f"Google Gemini({model})로 보내는 내용: {what}. 파일 이름은 F1, F2 같은 번호로 바꿔 보냅니다.")
+            st.caption(f"Google Gemini({md(model)})로 보내는 내용: {what}. 파일 이름은 F1, F2 같은 번호로 바꿔 보냅니다.")
+            if ai_match.request_is_trimmed(ss.plans):
+                st.caption(f"한 번에 파일 {ai_match.MAX_AI_FILES}개, 파일마다 원본 열 "
+                           f"{ai_match.MAX_AI_COLUMNS}개까지만 보냅니다. 나머지는 드롭다운에서 지정해 주세요.")
             with st.expander("전송될 내용 미리 보기"):
                 st.code(ai_match.preview_text(request), language="json")
             clicked = st.button("AI에게 매칭 추천 받기", key="ai_btn", disabled=not api_key or left <= 0)
@@ -320,7 +403,7 @@ def render_ai(scenario) -> None:
                        "남은 열은 드롭다운에서 직접 지정해 주세요.")
         if ss.ai_message:
             kind, text = ss.ai_message
-            getattr(st, kind)(text)
+            getattr(st, kind)(md(text))
 
 
 def render_matching(scenario) -> None:
@@ -329,11 +412,12 @@ def render_matching(scenario) -> None:
     st.caption("파일마다 원본 열이 어느 기준열로 들어가는지 확인하세요. 틀렸다면 드롭다운에서 고칠 수 있습니다. "
                "매칭 방법: 정확히 일치 / 동의어 / AI 추천 / 사용자 지정 / 매칭 안 됨")
     if st.session_state.map_error:
-        st.error(st.session_state.map_error)
+        st.error(md(st.session_state.map_error))
     render_ai(scenario)
+    # 경고·라벨에는 파일 이름·열 이름(업로드된 파일에서 온 글자)이 들어가므로 md()로 이스케이프한다
     warnings = pre_run_warnings(plans)
     if warnings:
-        st.warning("실행 전에 확인해 주세요.\n\n" + "\n".join(f"- {w}" for w in warnings))
+        st.warning("실행 전에 확인해 주세요.\n\n" + "\n".join(f"- {md(w)}" for w in warnings))
 
     for fi, plan in enumerate(plans):
         t, m = plan.table, plan.match
@@ -341,10 +425,10 @@ def render_matching(scenario) -> None:
         flag = " · 확인 필요" if plan.warnings() or n_ai else ""
         if n_ai:
             flag += f" · AI 추천 {n_ai}개"
-        label = f"{t.file_name} — 머리글 {t.header_row}행, 데이터 {len(t.rows):,}행{flag}"
+        label = f"{md(t.file_name)} — 머리글 {t.header_row}행, 데이터 {len(t.rows):,}행{flag}"
         with st.expander(label, expanded=bool(flag)):
             for w in plan.warnings():
-                st.warning(w)
+                st.warning(md(w))
             head = st.columns([3, 4, 2])
             head[0].markdown("**원본 열**")
             head[1].markdown("**→ 기준열**")
@@ -356,11 +440,11 @@ def render_matching(scenario) -> None:
                     st.session_state[key] = cm.source_index
                 row = st.columns([3, 4, 2], vertical_alignment="center")
                 row[0].selectbox(
-                    f"{cm.standard}의 원본 열", options, key=key,
+                    f"{md(cm.standard)}의 원본 열", options, key=key,
                     format_func=lambda i, m=m: NO_SOURCE if i is None else m.column_label(i),
                     on_change=on_map_change, args=(fi, cm.standard, key), label_visibility="collapsed")
                 req = " (필수)" if cm.required else ""
-                row[1].markdown(f"→ **{cm.standard}**{req}")
+                row[1].markdown(f"→ **{md(cm.standard)}**{req}")
                 method = cm.method
                 if cm.method == USER:
                     method = f":blue[{method}]"
@@ -370,7 +454,7 @@ def render_matching(scenario) -> None:
                     method = f":red[{method}]" if cm.required else f":gray[{method}]"
                 row[2].markdown(method)
             unmatched = [m.column_label(i) for i in m.unmatched_sources]
-            st.caption("매칭 안 된 원본 열: " + (", ".join(unmatched) if unmatched else "없음"))
+            st.caption("매칭 안 된 원본 열: " + (md(", ".join(unmatched)) if unmatched else "없음"))
 
 
 # ================================================================== 결과
@@ -421,7 +505,7 @@ def render_duplicates(result, res) -> None:
                 "나머지 그룹은 모든 행을 남깁니다.")
     for gi, (group, rows) in enumerate(items[:MAX_DUP_GROUPS_SHOWN]):
         with st.container(border=True):
-            st.markdown(f"**{group}** · 중복기준 {' + '.join(result.scenario.dup_keys)} · {len(rows)}행")
+            st.markdown(f"**{md(group)}** · 중복기준 {md(' + '.join(result.scenario.dup_keys))} · {len(rows)}행")
             st.dataframe(pd.DataFrame(
                 [{"출처 파일": r.source_file, "원래 행": str(r.excel_row), **{n: cell_text(r.raw[n]) for n in names}}
                  for r in rows]), hide_index=True, width="stretch")
@@ -430,10 +514,10 @@ def render_duplicates(result, res) -> None:
                 key = f"keep_{ss.result_id}_{gi}_{j}"
                 if key not in ss:
                     ss[key] = (r.source_file, r.excel_row) not in ss.excluded
-                cols[j % len(cols)].checkbox(f"남김: {r.source_file} {r.excel_row}행", key=key,
+                cols[j % len(cols)].checkbox(f"남김: {md(r.source_file)} {r.excel_row}행", key=key,
                                              on_change=on_keep_change, args=(key, r.source_file, r.excel_row))
             if group in res.fully_excluded_groups:
-                st.warning(f"{group}: 이 그룹의 행이 모두 빠집니다. 결과 파일에 이 그룹의 행이 하나도 남지 않습니다.")
+                st.warning(f"{md(group)}: 이 그룹의 행이 모두 빠집니다. 결과 파일에 이 그룹의 행이 하나도 남지 않습니다.")
             elif any((r.source_file, r.excel_row) in res.resolved_rows for r in rows) and \
                     any((r.source_file, r.excel_row) in res.excluded for r in rows):
                 st.caption("한 행만 남아 중복이 풀렸습니다. 남은 행의 중복 오류는 '중복 해소(이 행을 남김)'로 처리됩니다.")
@@ -452,6 +536,9 @@ def run_merge(scenario) -> None:
     except (ReadError, ScenarioError, JobError) as e:
         say("error", str(e))
         return
+    for old in (workspace() / "out").glob("*.xlsx"):   # 이전 실행의 결과 파일 정리
+        if old.resolve() != Path(path).resolve():
+            old.unlink(missing_ok=True)
     ss.result = result
     ss.result_id = uuid.uuid4().hex[:8]
     ss.outputs = {output_key(applied, ()): str(path)}
@@ -471,13 +558,30 @@ def output_for(res) -> Path | None:
                 ss.outputs[key] = str(run_job("write", ss.result, out_dir(), res.apply_suggestions,
                                               sorted(res.excluded), timeout=TIME_LIMIT))
         except TimeLimitError as e:
-            st.error(f"처리 시간 제한에 걸렸습니다. {e}")
+            st.error(md(f"처리 시간 제한에 걸렸습니다. {e}"))
             return None
         except (ReadError, ScenarioError, JobError) as e:
-            st.error(str(e))
+            st.error(md(str(e)))
             return None
+    else:
+        ss.outputs[key] = ss.outputs.pop(key)   # 가장 최근에 쓴 것을 맨 뒤로
+    prune_outputs()
     ss.current_output = ss.outputs[key]
     return Path(ss.outputs[key])
+
+
+def prune_outputs() -> None:
+    """최근 결과 파일 MAX_KEPT_OUTPUTS개만 남기고 지운다.
+
+    제안값 적용·남길 행 조합마다 파일이 생기므로, 지우지 않으면 체크를 바꿀 때마다 디스크가 늘어난다 (보안 검토 D-3).
+    """
+    ss = st.session_state
+    while len(ss.outputs) > MAX_KEPT_OUTPUTS:
+        old_key = next(iter(ss.outputs))
+        try:
+            Path(ss.outputs.pop(old_key)).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def render_result() -> None:
@@ -606,7 +710,12 @@ def main() -> None:
     if sig != ss.upload_sig:
         ss.upload_sig = sig
         if sig:
-            load_files(scenario, [(u.name, u.getvalue()) for u in uploads], "upload")
+            err = upload_batch_error([u.size for u in uploads])   # 파일 내용을 꺼내기 전에 검사
+            if err:
+                reset_from("files")
+                say("error", err)
+            else:
+                load_files(scenario, [(u.name, u.getvalue()) for u in uploads], "upload")
         elif ss.load_source == "upload":
             reset_from("files")
     show_messages()

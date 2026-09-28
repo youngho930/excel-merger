@@ -21,6 +21,7 @@ import os
 import pickle
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -64,15 +65,35 @@ def _job_sleep(seconds):
     return seconds
 
 
+def _job_env_names():
+    """자식이 받은 환경변수 이름 (비밀값이 넘어가지 않는지 확인하는 테스트용). 값은 돌려주지 않는다."""
+    return sorted(os.environ)
+
+
 JOBS = {
     "prepare": _job_prepare,
     "execute": _job_execute,
     "write": _job_write,
     "sleep": _job_sleep,
+    "env_names": _job_env_names,
 }
 
 
 # ------------------------------------------------------------------ 부모 쪽
+MAX_CONCURRENT_JOBS = 3
+_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_JOBS)
+
+# 자식 프로세스에 넘기지 않는 환경변수: 이름에 이 말이 들어가면 뺀다 (보안 검토 D-7).
+# 자식은 신뢰할 수 없는 xlsx를 파싱하므로 API 키 같은 비밀값을 물려주지 않는다.
+_SECRET_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
+
+
+def child_env() -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not any(w in k.upper() for w in _SECRET_WORDS)}
+    env["PYTHONPATH"] = str(ROOT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    return env
+
+
 def run_job(name: str, *args: Any, timeout: float = DEFAULT_TIMEOUT) -> Any:
     """작업 하나를 하위 프로세스에서 실행하고 결과를 돌려준다.
 
@@ -89,11 +110,16 @@ def run_job(name: str, *args: Any, timeout: float = DEFAULT_TIMEOUT) -> Any:
     kwargs: dict[str, Any] = {}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(ROOT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env = child_env()
+    # 앱 전체에서 동시에 도는 작업 수를 제한한다. 기다리는 시간도 제한 시간에 포함한다 (보안 검토 D-8)
+    started = time.monotonic()
+    if not _SLOTS.acquire(timeout=timeout):
+        raise TimeLimitError(
+            f"지금 처리 중인 작업이 많아 {_seconds(timeout)}초 안에 시작하지 못했습니다. 잠시 후 다시 시도해 주세요.")
     try:
+        left = max(timeout - (time.monotonic() - started), 0.1)
         proc = subprocess.run([sys.executable, "-m", "engine.jobs"], input=payload, capture_output=True,
-                              timeout=timeout, cwd=str(ROOT), env=env, **kwargs)
+                              timeout=left, cwd=str(ROOT), env=env, **kwargs)
     except subprocess.TimeoutExpired:
         # subprocess.run은 시간이 넘으면 자식 프로세스를 kill한 뒤 이 예외를 낸다
         raise TimeLimitError(
@@ -101,6 +127,8 @@ def run_job(name: str, *args: Any, timeout: float = DEFAULT_TIMEOUT) -> Any:
             "파일 수를 줄이거나, 파일을 나눠서 다시 시도해 주세요.") from None
     except OSError:
         raise JobError("처리 프로그램을 시작하지 못했습니다. 잠시 후 다시 시도해 주세요.") from None
+    finally:
+        _SLOTS.release()
 
     try:
         status, value = pickle.loads(proc.stdout) if proc.stdout else (FAILED, None)

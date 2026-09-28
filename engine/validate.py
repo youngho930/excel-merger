@@ -29,7 +29,7 @@ class Issue:
     file: str
     row: int | None               # 엑셀 행 번호. 파일 전체 오류면 None
     column: str | None            # 원본 열 이름 (중복은 "(행 전체)", 열이 없으면 None)
-    standard: str                 # 기준명 (중복은 "품번 + 로트번호")
+    standard: str                 # 기준명 (중복은 "품목코드 + 로트번호")
     kind: str
     value: Any                    # 원래 값
     message: str                  # 설명 (한국어)
