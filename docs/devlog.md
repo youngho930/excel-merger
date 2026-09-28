@@ -303,3 +303,16 @@ API 키 노출(화면·로그·예외·git 기록), AI 응답 검증, pickle 경
   - reader가 `MemoryError`를 "손상된 파일"로 바꾸지 않게 했다.
   - 상한을 넘으면 "메모리가 부족합니다"라고 안내한다. 이 테스트는 Ubuntu에서만 돈다.
 - `requirements.txt`에 최소 버전을 고정했다(예: `streamlit>=1.64,<2`). GitHub Actions에서 pytest를 돌리고 README에 배지를 달았다.
+
+### 업로드와 Linux(GitHub Actions)에서 처음 잡힌 문제
+- 작성자 이메일을 GitHub noreply 주소로 바꾼 뒤(기록 전체, 파일 내용은 그대로) `master`를 공개 저장소에 올렸다.
+- 웹에서 `.streamlit/secrets.toml`과 `.claude/launch.json`은 404(없음)임을 확인했다.
+- 첫 CI 실행에서 Windows에서는 보이지 않던 실패가 2건 나왔다.
+  - 작업 로그는 로그인해야 보인다. 그래서 실패한 테스트를 공개 주석(annotation)과 요약으로 남기도록 워크플로를 먼저 고쳤다.
+- **메모리 상한:** 200MB 상한에서 50MB만 잡아도 `MemoryError`가 났다.
+  - openpyxl이 부르는 numpy의 OpenBLAS가 CPU 코어 수만큼 스레드 버퍼를 미리 잡고 있었다.
+  - 코어가 많은 클라우드 서버일수록 더 심해지는 문제다.
+  - 하위 프로세스의 BLAS·OMP 스레드를 1개로 고정했다. 그 결과 기본 데이터 메모리가 **57MB**가 됐다(CI 진단 주석).
+- **깊은 중첩 JSON:** 깊이 5000인 JSON이 Windows에서는 `RecursionError`로 거부됐지만, Linux에서는 C 재귀 한도가 달라 그대로 파싱됐다.
+  - 운영체제와 관계없이 같게 동작하도록, 파싱 전에 중첩 깊이(최대 10)를 직접 검사한다.
+- 결과: Ubuntu에서 전체 테스트가 통과했다(Linux 전용 메모리 상한 테스트 포함).
