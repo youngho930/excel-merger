@@ -12,6 +12,8 @@
 5. 제목 줄이 1행이 아닌 파일도 처리한다 (머리글 행 자동 탐지).
 6. 화면과 오류 메시지는 모두 한국어로, 비개발자도 이해할 수 있게 쓴다.
 
+자유 양식 모드: 시나리오 없이 화면에서 열을 골라 취합하고, 정한 양식은 시나리오 YAML 로 내려받아 정식 시나리오로 쓸 수 있다.
+
 ## 기술 스택
 Python 3.11+, Streamlit, pandas, openpyxl, PyYAML. 배포는 Streamlit Community Cloud.
 
@@ -38,3 +40,4 @@ app.py (Streamlit 화면) / engine/ (매칭·취합·검증 로직) / scenarios/
 
 ## 검증 방식
 samples/expected_errors.md 가 정답지다. 기능이 완성됐다고 말하려면 정답지의 오류를 모두 잡았다는 증거(실행 결과)가 있어야 한다.
+samples/free_form_expected_errors.md 는 자유 양식 모드의 정답지다.
