@@ -102,15 +102,23 @@ APP_CSS = """<style>
   --xm-line: #2A3831;
   --xm-muted: #A3B0A8;
 }
-[data-testid="stMainBlockContainer"] { padding-top: 3.75rem; padding-bottom: 2rem; }
-@media (max-width: 640px) {
-  [data-testid="stMainBlockContainer"] { padding-top: 3.5rem; }
+/* 본문은 최대 약 1200px, 가운데 정렬 (넓은 화면에서 너무 퍼지지 않게) */
+[data-testid="stMainBlockContainer"] { padding-top: 4rem; padding-bottom: 2rem; }
+@media (min-width: 641px) {
+  [data-testid="stMainBlockContainer"] { max-width: calc(1200px + 5rem); margin: 0 auto;
+    padding-left: 2.5rem; padding-right: 2.5rem; }
 }
 
-/* 제품 이름: 작은 머리 표시 */
+/* 제품 이름: 브랜드 표시 */
 .st-key-brand h1 {
-  font-size: 0.95rem !important; font-weight: 600 !important; line-height: 1.4 !important;
-  color: var(--xm-muted); padding: 0 !important; margin: 0 !important; letter-spacing: 0.01em;
+  display: flex; align-items: center; gap: 0.4rem;
+  font-size: 1.2rem !important; font-weight: 800 !important; line-height: 1.3 !important;
+  color: inherit; padding: 0 !important; margin: 0 !important; letter-spacing: -0.01em;
+}
+.st-key-brand h1::before {
+  content: "table_chart" / ""; font-family: "Material Symbols Rounded"; font-weight: 400;
+  font-size: 1.45rem; line-height: 1; color: var(--xm-accent);
+  font-feature-settings: "liga"; -webkit-font-feature-settings: "liga";
 }
 .st-key-brand [data-testid="stHeaderActionElements"] { display: none; }
 
@@ -118,8 +126,8 @@ APP_CSS = """<style>
 .xm-wrap { container-type: inline-size; }
 .xm-wrap ul, .xm-wrap ol { padding-left: 0 !important; margin-left: 0 !important; list-style: none; }
 .xm-wrap li { margin-left: 0 !important; padding-left: 0; }
-.xm-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 300px);
-  gap: 1rem 2rem; align-items: center; }
+.xm-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 280px);
+  gap: 0.9rem 2.5rem; align-items: center; }
 .xm-chips { display: flex; flex-wrap: wrap; gap: 0.375rem; list-style: none; margin: 0 0 0.75rem; padding: 0; }
 .xm-chips li { font-size: 0.75rem; line-height: 1; padding: 0.35rem 0.6rem; margin: 0;
   border: 1px solid var(--xm-line); border-radius: 999px; color: var(--xm-muted); background: var(--xm-surface); }
@@ -129,23 +137,29 @@ APP_CSS = """<style>
 .xm-title em { font-style: normal; color: var(--xm-accent); }
 .xm-sub { margin: 0.7rem 0 0; color: var(--xm-muted); font-size: 0.975rem; line-height: 1.6;
   max-width: 40rem; word-break: keep-all; }
-.xm-stats { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
-.xm-stats li { display: flex; align-items: baseline; gap: 0.75rem; margin: 0; padding: 0.65rem 1rem;
-  border: 1px solid var(--xm-line); border-radius: 0.875rem; background: var(--xm-surface); }
-.xm-stats b { font-size: 1.45rem; font-weight: 800; line-height: 1.2; color: var(--xm-accent);
-  min-width: 3.4rem; font-variant-numeric: tabular-nums; }
-.xm-stats span { font-size: 0.85rem; color: var(--xm-muted); }
+/* 숫자 카드: 하나의 둥근 패널 안에 세로로. 숫자(크게, 강조색) 아래에 설명(작은 회색) */
+.xm-stats { list-style: none; margin: 0; padding: 0.35rem 1.25rem; display: grid;
+  border: 1px solid var(--xm-line); border-radius: 1rem; background: var(--xm-surface); }
+.xm-stats li { display: flex; flex-direction: column; gap: 0.1rem; margin: 0; padding: 0.5rem 0; }
+.xm-stats li + li { border-top: 1px solid var(--xm-line); }
+.xm-stats b { font-size: clamp(1.45rem, 1rem + 1.4vw, 2rem); font-weight: 800; line-height: 1.1;
+  color: var(--xm-accent); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.xm-stats span { font-size: 0.8rem; line-height: 1.35; color: var(--xm-muted); }
+/* .xm-wrap ul 초기화 규칙(padding-left: 0 !important)이 패널 안쪽 왼쪽 여백까지 지우지 않도록 되돌린다 */
+.xm-wrap .xm-stats { padding-left: 1.25rem !important; }
 @container (max-width: 640px) {
-  .xm-hero { grid-template-columns: minmax(0, 1fr); gap: 0.9rem; }
-  .xm-sub { font-size: 0.9rem; margin-top: 0.5rem; }
-  .xm-stats { gap: 0.4rem; }
-  .xm-stats li { padding: 0.45rem 0.85rem; }
-  .xm-stats b { font-size: 1.2rem; }
+  .xm-hero { grid-template-columns: minmax(0, 1fr); gap: 0.75rem; }
+  .xm-chips { margin-bottom: 0.6rem; }
+  .xm-sub { font-size: 0.875rem; line-height: 1.5; margin-top: 0.45rem; }
+  .xm-stats { padding: 0.35rem 1rem; }
+  .xm-wrap .xm-stats { padding-left: 1rem !important; }
+  .xm-stats li { padding: 0.28rem 0; gap: 0; }
+  .xm-stats b { font-size: 1.3rem; }
 }
 
 /* 작동 흐름 띠 */
-.xm-band { padding: 1rem 1.25rem 1.1rem; border: 1px solid var(--xm-line); border-radius: 1rem; }
-.xm-band-title { font-size: 0.8rem; font-weight: 700; color: var(--xm-muted); margin: 0 0 0.8rem; }
+.xm-band { padding: 0.8rem 1.25rem 0.9rem; border: 1px solid var(--xm-line); border-radius: 1rem; }
+.xm-band-title { font-size: 0.8rem; font-weight: 700; color: var(--xm-muted); margin: 0 0 0.6rem; }
 .xm-flow { list-style: none; margin: 0; padding: 0; display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1.5rem; }
 .xm-flow li { position: relative; display: flex; flex-direction: column; align-items: center;
@@ -160,11 +174,16 @@ APP_CSS = """<style>
 .xm-flow-text b { font-size: 0.9rem; font-weight: 700; line-height: 1.35; word-break: keep-all; }
 .xm-flow-text small { font-size: 0.75rem; color: var(--xm-muted); line-height: 1.4; word-break: keep-all; }
 .xm-flow-text i { font-style: normal; color: var(--xm-accent-2); }
+/* 좁은 화면: 체험 버튼을 밀어내지 않도록 작은 알약 모양으로 줄바꿈하고, 한 줄 설명은 숨긴다 */
 @container (max-width: 640px) {
-  .xm-flow { grid-template-columns: minmax(0, 1fr); gap: 0.85rem; }
-  .xm-flow li { flex-direction: row; text-align: left; gap: 0.75rem; }
-  .xm-flow li:not(:last-child)::after { content: "\\2193" / ""; right: auto; top: auto;
-    left: 1.25rem; bottom: -0.85rem; transform: translateX(-50%); font-size: 0.8rem; }
+  .xm-band { padding: 0.6rem 0.75rem 0.7rem; }
+  .xm-band-title { display: none; }   /* section 의 aria-label("작동 흐름")은 그대로 남는다 */
+  .xm-flow { display: flex; flex-wrap: wrap; gap: 0.4rem 1.15rem; }
+  .xm-flow li { flex-direction: row; text-align: left; gap: 0.3rem; }
+  .xm-flow li:not(:last-child)::after { right: -0.85rem; top: 50%; transform: translateY(-50%); font-size: 0.75rem; }
+  .xm-flow-icon { width: 1.5rem; height: 1.5rem; border-radius: 0.4rem; font-size: 1rem; }
+  .xm-flow-text b { font-size: 0.78rem; white-space: nowrap; }
+  .xm-flow-text small { display: none; }
 }
 
 /* 단계 카드와 원형 번호 배지 */
@@ -184,6 +203,11 @@ APP_CSS = """<style>
 /* 강조색 버튼: 초록 위 흰 글자는 대비가 낮아 어두운 글자를 쓴다 */
 [data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primary"] p { color: var(--xm-accent-ink) !important; }
 
+/* 이 도구에 대해 (설계 원칙 카드) */
+.st-key-about { margin-top: 1.5rem; }
+[class*="st-key-card_principle_"] [data-testid="stMarkdownContainer"] p { margin-bottom: 0.2rem; }
+[class*="st-key-card_principle_"] [data-testid="stIconMaterial"] { font-size: 1.4rem; vertical-align: -0.3rem; margin-right: 0.2rem; }
+
 /* 푸터 */
 .st-key-footer { margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--xm-line); }
 .st-key-footer [data-testid="stCaptionContainer"] { text-align: center; }
@@ -192,7 +216,7 @@ APP_CSS = """<style>
 HERO_TEMPLATE = """<div class="xm-wrap"><section class="xm-hero" aria-label="소개">
 <div class="xm-hero-text">
 <ul class="xm-chips" aria-label="사용 기술"><li>Python</li><li>Streamlit</li><li class="xm-ai">Gemini AI</li><li>openpyxl</li></ul>
-<h2 class="xm-title">양식이 제각각인 엑셀,<br>한 번에 <em>취합</em>하고 <em>오류까지</em></h2>
+<h2 class="xm-title">양식이 제각각인 엑셀,<br>한 번에 취합하고 <em>오류까지</em></h2>
 <p class="xm-sub">부서·협력사·지점마다 다른 엑셀 파일을 하나로 모으고, 빈칸·형식·중복 같은 오류를 자동으로 찾아 표시합니다. 원본 파일은 그대로 둡니다.</p>
 </div>
 <ul class="xm-stats" aria-label="숫자로 보는 특징">
@@ -273,16 +297,31 @@ def details(text: str) -> None:
 
 
 def render_sidebar() -> None:
+    """사이드바(기본은 접힘): 저장소 링크와 만든 사람만. 설계 원칙은 페이지 아래 '이 도구에 대해'로 옮겼다."""
     with st.sidebar:
-        st.subheader("이 도구에 대해")
-        st.markdown("부서·협력사·지점마다 양식이 다른 엑셀을 모으는 일은 손이 많이 가고 실수가 잦습니다.\n\n"
-                    "이 도구는 파일을 한 번에 모으고, 빈칸·형식·중복 같은 오류를 자동으로 찾아 표시합니다.")
-        st.markdown("**설계 원칙**\n"
-                    "1. 시나리오는 설정 파일로 — 새 양식은 설정 파일만 추가하면 됩니다.\n"
-                    "2. 규칙으로 먼저, 남은 열만 AI — 이름·동의어로 못 찾은 열만 AI에게 물어봅니다.\n"
-                    "3. 원본은 그대로, 외부로는 열 이름만 — 올린 파일은 바꾸지 않고, AI에는 기본으로 열 이름만 보냅니다.")
         st.markdown(f"[GitHub 저장소]({REPO_URL})")
         st.caption("만든 사람: 신영호")
+
+
+# 설계 원칙: (아이콘, 제목, 한 줄 설명). 코드에 고정된 글자라 Streamlit 기본 요소(마크다운)로 그린다
+PRINCIPLES = (
+    (":material/tune:", "시나리오는 설정 파일로", "새 양식은 설정 파일(YAML)만 추가하면 됩니다. 엔진 코드는 고치지 않습니다."),
+    (":material/rule:", "규칙으로 먼저, 남은 열만 AI", "이름·동의어로 못 찾은 열만 AI에게 물어봅니다. AI 없이도 동작합니다."),
+    (":material/shield:", "원본은 수정하지 않고 외부로는 열 이름만 전송",
+     "올린 파일은 바꾸지 않고 결과는 새 파일로 만듭니다. AI에는 기본으로 열 이름만 보냅니다."),
+)
+
+
+def render_about() -> None:
+    """페이지 아래쪽 '이 도구에 대해': 만든 목적 + 설계 원칙 카드 3개 (좁은 화면에서는 세로로 쌓인다)."""
+    with st.container(key="about"):
+        st.subheader("이 도구에 대해")
+        st.caption("부서·협력사·지점마다 양식이 다른 엑셀을 모으는 일은 손이 많이 가고 실수가 잦습니다. "
+                   "이 도구는 파일을 한 번에 모으고, 빈칸·형식·중복 같은 오류를 자동으로 찾아 표시합니다.")
+        for col, (i, (icon, title, text)) in zip(st.columns(len(PRINCIPLES)), enumerate(PRINCIPLES, 1)):
+            with col.container(border=True, key=f"card_principle_{i}", height="stretch"):
+                st.markdown(f":green[{icon}] **{title}**")
+                st.caption(text)
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
@@ -944,16 +983,18 @@ def render_issue_list(result, res, remaining: int) -> None:
 
 # ================================================================== 화면
 def main() -> None:
-    st.set_page_config(page_title="엑셀 자동 취합·검증기", page_icon=":material/table_chart:", layout="wide")
+    st.set_page_config(page_title="엑셀 자동 취합·검증기", page_icon=":material/table_chart:", layout="wide",
+                       initial_sidebar_state="collapsed")
     init_state()
 
     render_sidebar()
     st.html(APP_CSS)
     with st.container(key="brand"):
         st.title("엑셀 자동 취합·검증기")
-    # 첫 화면(1280×720, 휴대폰 375×812)에서 "샘플 파일로 바로 체험" 버튼이 스크롤 없이 보이도록
-    # 히어로는 짧게 두고, 작동 흐름 띠는 버튼 아래에 둔다
+    # 첫 화면(1280×800, 사이드바 접힘)에서 헤드라인·숫자 패널·작동 흐름·체험 버튼이 스크롤 없이 보이도록
+    # 히어로 여백을 줄이고, 좁은 화면에서는 흐름 띠를 작은 알약 모양으로 줄인다
     st.html(hero_html(len(KINDS), load_test_count()))
+    st.html(flow_html(len(KINDS)))
 
     # ---- 1. 시나리오
     try:
@@ -967,8 +1008,8 @@ def main() -> None:
     by_key = {s.key: s for s in scenarios}
     with st.container(border=True, key="card_scenario"):
         scenario = render_scenario_card(by_key)
-    st.html(flow_html(len(KINDS)))
     render_steps_after_scenario(scenario)
+    render_about()
     render_footer()
 
 
@@ -1007,7 +1048,8 @@ def render_scenario_card(by_key: dict):
     # 버튼 아래에 접어 둔다 (첫 화면에서 버튼이 위에 보이도록)
     if samples:
         render_sample_preview(scenario, samples)
-    with st.expander("이 시나리오의 기준열 보기"):
+    # 기준열 표·중복기준·용어 설명을 하나로 접어 둔다
+    with st.expander("시나리오 자세히 보기"):
         if scenario.description:
             st.caption(scenario.description)
         st.dataframe(pd.DataFrame([{
@@ -1022,10 +1064,10 @@ def render_scenario_card(by_key: dict):
                                help="파일에 이 이름으로 적혀 있어도 같은 기준열로 알아봅니다.")})
         if scenario.dup_keys:
             st.markdown("중복기준: " + md(" + ".join(scenario.dup_keys)), help=GLOSSARY["중복기준"])
-    details("- **시나리오**는 '어떤 엑셀을 모을지'에 대한 설정입니다. 결과 엑셀의 열(기준열), 필수 여부, "
-            "형식, 허용값, 중복기준이 들어 있습니다.\n"
-            "- **샘플 파일로 바로 체험**: 이 시나리오의 샘플 엑셀을 올린 것처럼 불러옵니다. 샘플에는 일부러 오류를 넣어 두었습니다.\n"
-            "- **AI 매칭 체험**: 열 이름이 동의어 사전에 없는 파일입니다. AI 추천으로 열을 맞추는 과정을 볼 수 있습니다.")
+        st.markdown("- **시나리오**는 '어떤 엑셀을 모을지'에 대한 설정입니다. 결과 엑셀의 열(기준열), 필수 여부, "
+                    "형식, 허용값, 중복기준이 들어 있습니다.\n"
+                    "- **샘플 파일로 바로 체험**: 이 시나리오의 샘플 엑셀을 올린 것처럼 불러옵니다. 샘플에는 일부러 오류를 넣어 두었습니다.\n"
+                    "- **AI 매칭 체험**: 열 이름이 동의어 사전에 없는 파일입니다. AI 추천으로 열을 맞추는 과정을 볼 수 있습니다.")
     return scenario
 
 

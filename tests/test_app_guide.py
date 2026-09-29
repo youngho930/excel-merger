@@ -31,6 +31,8 @@ def test_intro_is_short_and_shows_the_flow():
     hero = next(b for b in html_bodies(at) if 'class="xm-hero"' in b)
     # 두 줄 제목 + 부제 한두 문장. 첫 안내가 길어지면 버튼이 첫 화면 밖으로 밀린다
     assert "양식이 제각각인 엑셀,<br>" in hero and "오류까지" in hero
+    # 두 번째 줄은 "오류까지"만 강조색 ("취합"은 본문 글자색)
+    assert "한 번에 취합하고 <em>오류까지</em>" in hero and re.findall(r"<em>(.*?)</em>", hero) == ["오류까지"]
     sub = re.search(r'<p class="xm-sub">(.*?)</p>', hero).group(1)
     assert len(sub) <= 120 and sub.count(".") <= 2
     for chip in ("Python", "Streamlit", "Gemini AI", "openpyxl"):
@@ -48,10 +50,13 @@ def test_hero_numbers_are_real_values():
     hero = next(b for b in html_bodies(at) if 'class="xm-hero"' in b)
     assert f"<b>{len(KINDS)}종</b>" in hero and "<b>0줄</b>" in hero
     assert f"<b>{app.load_test_count()}개</b><span>자동 테스트</span>" in hero
+    # 숫자 카드 3개가 하나의 패널(ul.xm-stats) 안에, 숫자(b) 다음에 설명(span)
+    panel = re.search(r'<ul class="xm-stats"[^>]*>(.*?)</ul>', hero, re.S).group(1)
+    assert len(re.findall(r"<li><b>[^<]+</b><span>[^<]+</span></li>", panel)) == 3
 
 
 def test_buttons_come_right_after_the_hero():
-    # 히어로 -> 시나리오 선택 -> 체험 버튼 -> 작동 흐름 띠 순서 (흐름 띠가 버튼을 밀어내지 않는다)
+    # 히어로 -> 작동 흐름 띠 -> 시나리오 선택 -> 체험 버튼 순서 (버튼 앞에는 이것들만 온다)
     at = first_screen()
     order = []
     for n in iter_nodes(at.main):
@@ -60,8 +65,11 @@ def test_buttons_come_right_after_the_hero():
             order.append("hero" if 'class="xm-hero"' in body else "flow" if 'class="xm-flow"' in body else "css")
         else:
             order.append(getattr(n, "key", None))
-    assert order.index("hero") < order.index("scenario") < order.index("sample_btn") \
-        < order.index("ai_demo_btn_0") < order.index("flow")
+    assert order.index("hero") < order.index("flow") < order.index("scenario") < order.index("sample_btn") \
+        < order.index("ai_demo_btn_0")
+    # 버튼보다 앞에 접기 메뉴나 표 같은 다른 요소가 끼어들지 않는다 (첫 화면에 버튼이 들어오도록)
+    before = list(iter_nodes(at.main))[:order.index("sample_btn")]
+    assert not [n for n in before if type(n).__name__ in ("Expander", "Dataframe", "Metric")]
 
 
 def test_footer_shows_author_and_repo():
@@ -71,13 +79,23 @@ def test_footer_shows_author_and_repo():
 
 
 def test_sample_button_comes_before_the_folded_details():
-    # 버튼이 위로 오고, 기준열·미리보기·자세히 보기는 그 아래 접혀 있다
+    # 버튼이 위로 오고, 미리보기와 "시나리오 자세히 보기"(기준열 표 + 중복기준 + 설명)는 그 아래 접혀 있다
     at = first_screen()
     labels = [e.label for e in at.expander]
-    assert labels[:3] == ["샘플 파일 미리보기", "이 시나리오의 기준열 보기", "자세히 보기"]
+    assert labels[:2] == ["샘플 파일 미리보기", "시나리오 자세히 보기"]
+    assert "이 시나리오의 기준열 보기" not in labels
     order = [getattr(n, "key", None) or getattr(n, "label", None) for n in iter_nodes(at.main)]
-    assert order.index("sample_btn") < order.index("샘플 파일 미리보기")
+    assert order.index("sample_btn") < order.index("샘플 파일 미리보기") < order.index("시나리오 자세히 보기")
     assert all(not e.proto.expanded for e in at.expander)          # 기본은 접힘
+    # 합친 칸에 기준열 표, 중복기준 도움말, 기존 설명 글이 모두 들어 있다
+    merged = next(e for e in at.expander if e.label == "시나리오 자세히 보기")
+    tables = [n for n in iter_nodes(merged) if type(n).__name__ == "Dataframe"]
+    assert len(tables) == 1 and "기준열" in tables[0].value.columns
+    md_nodes = [n for n in iter_nodes(merged) if type(n).__name__ == "Markdown"]
+    assert any(n.value.startswith("중복기준: ") and n.proto.help for n in md_nodes)
+    text = " ".join(n.value for n in md_nodes)
+    for phrase in ("**시나리오**는", "**샘플 파일로 바로 체험**", "**AI 매칭 체험**"):
+        assert phrase in text, phrase
 
 
 def iter_nodes(node):
@@ -98,13 +116,44 @@ def test_sample_preview_shows_each_file_with_its_own_headers():
     assert "머리글이 3행에 있습니다" in notes                       # 제목 줄이 있는 파일
 
 
-def test_sidebar_about_section():
+def test_sidebar_has_only_repo_link_and_author():
     at = first_screen()
     text = " ".join(m.value for m in at.sidebar.markdown) + " " + " ".join(c.value for c in at.sidebar.caption)
-    assert "이 도구에 대해" in " ".join(s.value for s in at.sidebar.subheader)
-    for phrase in ("시나리오는 설정 파일로", "규칙으로 먼저, 남은 열만 AI", "열 이름만",
-                   "https://github.com/youngho930/excel-merger", "만든 사람: 신영호"):
+    for phrase in ("https://github.com/youngho930/excel-merger", "만든 사람: 신영호"):
         assert phrase in text, phrase
+    assert "설계 원칙" not in text and "시나리오는 설정 파일로" not in text   # 원칙은 페이지 아래로 옮겼다
+    assert not at.sidebar.subheader
+
+
+def test_about_section_shows_three_principle_cards_at_the_bottom():
+    at = first_screen()
+    about = next(n for n in iter_nodes(at.main) if getattr(n, "key", None) == "about")
+    assert "이 도구에 대해" in [n.value for n in iter_nodes(about) if type(n).__name__ == "Subheader"]
+    cards = [next(n for n in iter_nodes(about) if getattr(n, "key", None) == f"card_principle_{i}")
+             for i in (1, 2, 3)]
+    titles = ["시나리오는 설정 파일로", "규칙으로 먼저, 남은 열만 AI", "원본은 수정하지 않고 외부로는 열 이름만 전송"]
+    for card, title in zip(cards, titles):
+        heads = [n.value for n in iter_nodes(card) if type(n).__name__ == "Markdown"]
+        notes = [n.value for n in iter_nodes(card) if type(n).__name__ == "Caption"]
+        assert len(heads) == 1 and ":material/" in heads[0] and f"**{title}**" in heads[0]   # 아이콘 + 제목
+        assert len(notes) == 1 and notes[0]                                                     # 한 줄 설명
+    captions = " ".join(n.value for n in iter_nodes(about) if type(n).__name__ == "Caption")
+    assert "손이 많이 가고 실수가 잦습니다" in captions                                          # 만든 목적
+    # 페이지 아래쪽: 업로드 단계보다 뒤, 푸터보다 앞
+    keys = [getattr(n, "key", None) for n in iter_nodes(at.main)]
+    assert keys.index("card_upload") < keys.index("about") < keys.index("footer")
+
+
+def test_page_is_centered_and_sidebar_starts_collapsed():
+    import ast
+
+    import app
+    assert "max-width: calc(1200px + 5rem)" in app.APP_CSS and "margin: 0 auto" in app.APP_CSS
+    tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
+    config = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                  and isinstance(n.func, ast.Attribute) and n.func.attr == "set_page_config")
+    kw = {k.arg: ast.literal_eval(k.value) for k in config.keywords}
+    assert kw["layout"] == "wide" and kw["initial_sidebar_state"] == "collapsed"
 
 
 def test_terms_have_question_mark_help():
