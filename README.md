@@ -84,6 +84,8 @@ pytest
 
 - `samples/expected_errors.md`(정답지, 37건)와 엔진 결과를 대조하는 테스트가 포함되어 있습니다.
 - 화면은 `streamlit.testing.v1.AppTest` 로 시험합니다. AI 매칭 테스트는 가짜 응답을 쓰므로 실제 API를 부르지 않습니다.
+- 화면 맨 위의 "자동 테스트 N개" 숫자는 `project_stats.toml` 한 곳에서 관리합니다. 실제로 수집되는 테스트 개수(`pytest --collect-only -q`)와 다르면 `tests/test_project_stats.py` 가 실패합니다.
+- 화면 디자인용 HTML은 코드에 고정된 문자열과 앱이 계산한 정수만 씁니다. 파일 이름·열 이름 같은 글자는 넣지 않으며, `tests/test_design_safety.py` 가 이를 검사합니다. 외부에서 불러오는 것은 Pretendard 글꼴 CSS 하나뿐입니다.
 - 샘플을 다시 만들려면 `python scripts/make_samples.py`(시나리오 샘플과 정답지), `python scripts/make_ai_demo.py`(AI 매칭 체험 파일).
 
 ## Gemini 키 설정 (선택)

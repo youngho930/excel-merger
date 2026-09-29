@@ -9,3 +9,22 @@ toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+# 어두운 테마. 강조색은 엑셀 초록(#21A366) 하나, 보조색(#F2C14E, AI 표시)은 app.py 의 APP_CSS 에서만 쓴다.
+base = "dark"
+primaryColor = "#21A366"
+greenColor = "#21A366"
+linkColor = "#4FC98C"
+backgroundColor = "#0F1512"
+secondaryBackgroundColor = "#1A231E"
+textColor = "#E6ECE8"
+borderColor = "#2A3831"
+baseRadius = "0.75rem"
+# 한글 글꼴: Pretendard 웹폰트(CDN). "글꼴 목록:CSS 주소" 형식이며, 불러오지 못하면 목록의 다음 글꼴로 넘어간다.
+# 외부에서 불러오는 것은 이 글꼴 CSS 하나뿐이다 (tests/test_design_safety.py 가 확인).
+font = "'Pretendard Variable', Pretendard, -apple-system, BlinkMacSystemFont, system-ui, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', sans-serif:https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css"
+
+[theme.sidebar]
+backgroundColor = "#131B17"
+secondaryBackgroundColor = "#1A231E"

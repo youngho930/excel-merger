@@ -1,10 +1,14 @@
-"""화면 사용 안내: 짧은 첫 안내, 단계별 한 줄 설명 + 자세히 보기, 용어 도움말, 샘플 미리보기, 사이드바."""
+"""화면 사용 안내: 짧은 첫 안내(히어로), 작동 흐름 띠, 단계별 한 줄 설명 + 자세히 보기, 용어 도움말,
+샘플 미리보기, 사이드바, 푸터."""
+
+import re
 
 from streamlit.testing.v1 import AppTest
 
 from answer_key import ROOT
 
 APP = str(ROOT / "app.py")
+FLOW_STEPS = ["파일 업로드", "머리글 자동 탐지", "열 매칭(규칙→AI)", "오류 검증 5종", "결과 엑셀"]
 
 
 def first_screen() -> AppTest:
@@ -14,12 +18,56 @@ def first_screen() -> AppTest:
     return at
 
 
-def test_intro_is_short_and_shows_the_30_second_path():
+def html_bodies(at) -> list[str]:
+    return [e.proto.body for e in at.get("html")]
+
+
+def visible_text(html: str) -> str:
+    return re.sub(r"<[^>]+>", "", html)
+
+
+def test_intro_is_short_and_shows_the_flow():
     at = first_screen()
-    intro = at.markdown[0].value
-    assert len([line for line in intro.splitlines() if line.strip()]) <= 3
-    assert "양식이 제각각인 엑셀" in intro
-    assert "30초 체험" in intro and "① 샘플 파일로 바로 체험" in intro and "④ 결과 엑셀 받기" in intro
+    hero = next(b for b in html_bodies(at) if 'class="xm-hero"' in b)
+    # 두 줄 제목 + 부제 한두 문장. 첫 안내가 길어지면 버튼이 첫 화면 밖으로 밀린다
+    assert "양식이 제각각인 엑셀,<br>" in hero and "오류까지" in hero
+    sub = re.search(r'<p class="xm-sub">(.*?)</p>', hero).group(1)
+    assert len(sub) <= 120 and sub.count(".") <= 2
+    for chip in ("Python", "Streamlit", "Gemini AI", "openpyxl"):
+        assert f">{chip}</li>" in hero
+    # 작동 흐름 5단계가 순서대로 (이전의 "30초 체험" 안내를 대신한다)
+    flow = visible_text(next(b for b in html_bodies(at) if 'class="xm-flow"' in b))
+    positions = [flow.index(s) for s in FLOW_STEPS]
+    assert positions == sorted(positions)
+
+
+def test_hero_numbers_are_real_values():
+    from engine import KINDS
+    import app
+    at = first_screen()
+    hero = next(b for b in html_bodies(at) if 'class="xm-hero"' in b)
+    assert f"<b>{len(KINDS)}종</b>" in hero and "<b>0줄</b>" in hero
+    assert f"<b>{app.load_test_count()}개</b><span>자동 테스트</span>" in hero
+
+
+def test_buttons_come_right_after_the_hero():
+    # 히어로 -> 시나리오 선택 -> 체험 버튼 -> 작동 흐름 띠 순서 (흐름 띠가 버튼을 밀어내지 않는다)
+    at = first_screen()
+    order = []
+    for n in iter_nodes(at.main):
+        if type(n).__name__ == "UnknownElement" and getattr(n, "type", None) == "html":
+            body = n.proto.body
+            order.append("hero" if 'class="xm-hero"' in body else "flow" if 'class="xm-flow"' in body else "css")
+        else:
+            order.append(getattr(n, "key", None))
+    assert order.index("hero") < order.index("scenario") < order.index("sample_btn") \
+        < order.index("ai_demo_btn_0") < order.index("flow")
+
+
+def test_footer_shows_author_and_repo():
+    at = first_screen()
+    captions = " ".join(c.value for c in at.main.caption)
+    assert "만든 사람 신영호" in captions and "(https://github.com/youngho930/excel-merger)" in captions
 
 
 def test_sample_button_comes_before_the_folded_details():
@@ -68,5 +116,5 @@ def test_terms_have_question_mark_help():
     for label in ("남은 오류", "전체 오류", "처리됨", "수정 제안 있음"):
         assert helps[label], label
     subheaders = {s.value: s.proto.help for s in at.subheader}
-    assert subheaders["5. 중복 행 고르기"]                          # 중복 그룹 설명
+    assert subheaders[":green-badge[5] 중복 행 고르기"]              # 중복 그룹 설명 (번호는 원형 배지)
     assert "자세히 보기" in [e.label for e in at.expander]

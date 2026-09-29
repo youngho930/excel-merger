@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import time
+import tomllib
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -85,9 +86,178 @@ GLOSSARY = {
 }
 
 
-def step(title: str, summary: str, help: str | None = None) -> None:
-    """단계 제목 + 한 줄 설명. 자세한 내용은 details()로 접어 둔다."""
-    st.subheader(title, help=help)
+# ================================================================== 디자인 (HTML·CSS)
+# 보안 원칙: unsafe HTML(st.html)로 내보내는 것은 아래의 "코드에 고정된 문자열"과
+# 앱이 계산한 정수만 끼워 넣는 SAFE_HTML_FUNCS 의 결과뿐이다.
+# 파일 이름·열 이름·시나리오 이름·설명·오류 메시지 같은 글자는 절대 이 HTML에 넣지 않는다
+# (tests/test_design_safety.py 가 AST로 검사한다). 그런 글자는 st.markdown + md() 로만 보여준다.
+PROJECT_STATS = ROOT / "project_stats.toml"   # 화면 숫자 카드의 테스트 개수 (한 곳에서 관리)
+
+APP_CSS = """<style>
+:root {
+  --xm-accent: #21A366;      /* 강조색: 엑셀 초록 */
+  --xm-accent-ink: #04150C;  /* 강조색 위 글자 (명도 대비 확보) */
+  --xm-accent-2: #F2C14E;    /* 보조색: AI 관련 표시에만 */
+  --xm-surface: #151D19;
+  --xm-line: #2A3831;
+  --xm-muted: #A3B0A8;
+}
+[data-testid="stMainBlockContainer"] { padding-top: 3.75rem; padding-bottom: 2rem; }
+@media (max-width: 640px) {
+  [data-testid="stMainBlockContainer"] { padding-top: 3.5rem; }
+}
+
+/* 제품 이름: 작은 머리 표시 */
+.st-key-brand h1 {
+  font-size: 0.95rem !important; font-weight: 600 !important; line-height: 1.4 !important;
+  color: var(--xm-muted); padding: 0 !important; margin: 0 !important; letter-spacing: 0.01em;
+}
+.st-key-brand [data-testid="stHeaderActionElements"] { display: none; }
+
+/* 히어로 */
+.xm-wrap { container-type: inline-size; }
+.xm-wrap ul, .xm-wrap ol { padding-left: 0 !important; margin-left: 0 !important; list-style: none; }
+.xm-wrap li { margin-left: 0 !important; padding-left: 0; }
+.xm-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 300px);
+  gap: 1rem 2rem; align-items: center; }
+.xm-chips { display: flex; flex-wrap: wrap; gap: 0.375rem; list-style: none; margin: 0 0 0.75rem; padding: 0; }
+.xm-chips li { font-size: 0.75rem; line-height: 1; padding: 0.35rem 0.6rem; margin: 0;
+  border: 1px solid var(--xm-line); border-radius: 999px; color: var(--xm-muted); background: var(--xm-surface); }
+.xm-chips li.xm-ai { border-color: rgba(242, 193, 78, 0.45); color: var(--xm-accent-2); }
+.xm-title { font-size: clamp(1.45rem, 1rem + 1.8vw, 2.35rem); line-height: 1.25; font-weight: 800;
+  letter-spacing: -0.02em; margin: 0; padding: 0; color: inherit; word-break: keep-all; }
+.xm-title em { font-style: normal; color: var(--xm-accent); }
+.xm-sub { margin: 0.7rem 0 0; color: var(--xm-muted); font-size: 0.975rem; line-height: 1.6;
+  max-width: 40rem; word-break: keep-all; }
+.xm-stats { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+.xm-stats li { display: flex; align-items: baseline; gap: 0.75rem; margin: 0; padding: 0.65rem 1rem;
+  border: 1px solid var(--xm-line); border-radius: 0.875rem; background: var(--xm-surface); }
+.xm-stats b { font-size: 1.45rem; font-weight: 800; line-height: 1.2; color: var(--xm-accent);
+  min-width: 3.4rem; font-variant-numeric: tabular-nums; }
+.xm-stats span { font-size: 0.85rem; color: var(--xm-muted); }
+@container (max-width: 640px) {
+  .xm-hero { grid-template-columns: minmax(0, 1fr); gap: 0.9rem; }
+  .xm-sub { font-size: 0.9rem; margin-top: 0.5rem; }
+  .xm-stats { gap: 0.4rem; }
+  .xm-stats li { padding: 0.45rem 0.85rem; }
+  .xm-stats b { font-size: 1.2rem; }
+}
+
+/* 작동 흐름 띠 */
+.xm-band { padding: 1rem 1.25rem 1.1rem; border: 1px solid var(--xm-line); border-radius: 1rem; }
+.xm-band-title { font-size: 0.8rem; font-weight: 700; color: var(--xm-muted); margin: 0 0 0.8rem; }
+.xm-flow { list-style: none; margin: 0; padding: 0; display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1.5rem; }
+.xm-flow li { position: relative; display: flex; flex-direction: column; align-items: center;
+  text-align: center; gap: 0.45rem; margin: 0; min-width: 0; }
+.xm-flow li:not(:last-child)::after { content: "\\2192" / ""; position: absolute; right: -1.15rem;
+  top: 0.6rem; color: var(--xm-muted); font-size: 1rem; line-height: 1; }
+.xm-flow-icon { display: grid; place-items: center; flex: none; width: 2.5rem; height: 2.5rem;
+  border-radius: 0.75rem; background: rgba(33, 163, 102, 0.15); color: var(--xm-accent);
+  font-family: "Material Symbols Rounded"; font-size: 1.35rem; line-height: 1; font-weight: 400;
+  font-feature-settings: "liga"; -webkit-font-feature-settings: "liga"; overflow: hidden; white-space: nowrap; }
+.xm-flow-text { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.xm-flow-text b { font-size: 0.9rem; font-weight: 700; line-height: 1.35; word-break: keep-all; }
+.xm-flow-text small { font-size: 0.75rem; color: var(--xm-muted); line-height: 1.4; word-break: keep-all; }
+.xm-flow-text i { font-style: normal; color: var(--xm-accent-2); }
+@container (max-width: 640px) {
+  .xm-flow { grid-template-columns: minmax(0, 1fr); gap: 0.85rem; }
+  .xm-flow li { flex-direction: row; text-align: left; gap: 0.75rem; }
+  .xm-flow li:not(:last-child)::after { content: "\\2193" / ""; right: auto; top: auto;
+    left: 1.25rem; bottom: -0.85rem; transform: translateX(-50%); font-size: 0.8rem; }
+}
+
+/* 단계 카드와 원형 번호 배지 */
+[class*="st-key-card_"] { background: var(--xm-surface); border-color: var(--xm-line) !important;
+  border-radius: 1rem !important; }
+[class*="st-key-card_"] h3 { font-size: 1.3rem; }
+[class*="st-key-card_"] h3 [data-testid="stMarkdownBadge"],
+[class*="st-key-card_"] h3 .stMarkdownBadge {
+  display: inline-grid; place-items: center; width: 1.6rem; height: 1.6rem; padding: 0 !important;
+  margin-right: 0.35rem; border-radius: 50% !important; vertical-align: 0.15em;
+  background: var(--xm-accent) !important; color: var(--xm-accent-ink) !important;
+  font-size: 0.85rem !important; font-weight: 800; line-height: 1;
+}
+.st-key-metric_remaining [data-testid="stMetric"] { border-color: var(--xm-accent) !important;
+  background: rgba(33, 163, 102, 0.08); }
+
+/* 강조색 버튼: 초록 위 흰 글자는 대비가 낮아 어두운 글자를 쓴다 */
+[data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primary"] p { color: var(--xm-accent-ink) !important; }
+
+/* 푸터 */
+.st-key-footer { margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--xm-line); }
+.st-key-footer [data-testid="stCaptionContainer"] { text-align: center; }
+</style>"""
+
+HERO_TEMPLATE = """<div class="xm-wrap"><section class="xm-hero" aria-label="소개">
+<div class="xm-hero-text">
+<ul class="xm-chips" aria-label="사용 기술"><li>Python</li><li>Streamlit</li><li class="xm-ai">Gemini AI</li><li>openpyxl</li></ul>
+<h2 class="xm-title">양식이 제각각인 엑셀,<br>한 번에 <em>취합</em>하고 <em>오류까지</em></h2>
+<p class="xm-sub">부서·협력사·지점마다 다른 엑셀 파일을 하나로 모으고, 빈칸·형식·중복 같은 오류를 자동으로 찾아 표시합니다. 원본 파일은 그대로 둡니다.</p>
+</div>
+<ul class="xm-stats" aria-label="숫자로 보는 특징">
+<li><b>{kinds}종</b><span>자동 오류 검출</span></li>
+<li><b>0줄</b><span>새 양식 추가 시 코드 수정</span></li>
+{tests_card}</ul>
+</section></div>"""
+HERO_TESTS_CARD = "<li><b>{tests}개</b><span>자동 테스트</span></li>\n"
+
+# 아이콘은 Streamlit에 들어 있는 Material Symbols 글꼴을 쓴다 (st.html 은 SVG를 지우고, 외부 요청도 늘지 않는다)
+_ICON = '<span class="xm-flow-icon" aria-hidden="true">{}</span>'
+FLOW_TEMPLATE = (
+    '<div class="xm-wrap"><section class="xm-band" aria-label="작동 흐름">'
+    '<p class="xm-band-title">작동 흐름</p><ol class="xm-flow">'
+    '<li>' + _ICON.format("upload_file")
+    + '<div class="xm-flow-text"><b>파일 업로드</b><small>양식이 다른 엑셀 여러 개</small></div></li>'
+    '<li>' + _ICON.format("table_rows")
+    + '<div class="xm-flow-text"><b>머리글 자동 탐지</b><small>제목 줄이 있어도 찾아냄</small></div></li>'
+    '<li>' + _ICON.format("compare_arrows")
+    + '<div class="xm-flow-text"><b>열 매칭(규칙→<i>AI</i>)</b><small>이름·동의어 먼저, 남은 열만 AI</small></div></li>'
+    '<li>' + _ICON.format("fact_check")
+    + '<div class="xm-flow-text"><b>오류 검증 {kinds}종</b><small>빈칸·형식·범위·허용값·중복</small></div></li>'
+    '<li>' + _ICON.format("table_view")
+    + '<div class="xm-flow-text"><b>결과 엑셀</b><small>오류 칸 색칠 + 오류목록 시트</small></div></li>'
+    '</ol></section></div>')
+
+
+def _whole_number(value: Any) -> int:
+    """HTML에 끼워 넣을 수 있는 값은 앱이 계산한 0 이상의 정수뿐이다 (글자·bool은 거부)."""
+    if type(value) is not int or value < 0:
+        raise TypeError("디자인 HTML에는 0 이상의 정수만 넣을 수 있습니다.")
+    return value
+
+
+def hero_html(kinds: int, tests: int | None) -> str:
+    """맨 위 히어로. kinds=오류 종류 수, tests=자동 테스트 수(없으면 그 카드를 뺀다)."""
+    card = "" if tests is None else HERO_TESTS_CARD.format(tests=_whole_number(tests))
+    return HERO_TEMPLATE.format(kinds=_whole_number(kinds), tests_card=card)
+
+
+def flow_html(kinds: int) -> str:
+    """작동 흐름 띠 (5단계)."""
+    return FLOW_TEMPLATE.format(kinds=_whole_number(kinds))
+
+
+SAFE_HTML_FUNCS = ("hero_html", "flow_html")   # st.html 인자로 쓸 수 있는 함수 (정수만 받는다)
+
+
+def load_test_count() -> int | None:
+    """project_stats.toml 의 테스트 개수. 파일이 없거나 값이 이상하면 None (카드를 숨긴다)."""
+    try:
+        n = tomllib.loads(PROJECT_STATS.read_text(encoding="utf-8"))["tests"]["count"]
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError):
+        return None
+    return n if type(n) is int and n > 0 else None
+
+
+def render_footer() -> None:
+    with st.container(key="footer"):
+        st.caption(f"만든 사람 신영호 · [GitHub 저장소]({REPO_URL})")
+
+
+def step(num: int, title: str, summary: str, help: str | None = None) -> None:
+    """단계 제목(원형 번호 배지) + 한 줄 설명. 자세한 내용은 details()로 접어 둔다."""
+    st.subheader(f":green-badge[{_whole_number(num)}] {title}", help=help)
     st.caption(summary)
 
 
@@ -501,7 +671,7 @@ def render_ai(scenario) -> None:
 
 def render_matching(scenario) -> None:
     plans = st.session_state.plans
-    step("3. 열 매칭 확인", "원본 열이 어느 기준열로 들어가는지 확인하고, 틀리면 드롭다운에서 고칩니다.",
+    step(3, "열 매칭 확인", "원본 열이 어느 기준열로 들어가는지 확인하고, 틀리면 드롭다운에서 고칩니다.",
          help=GLOSSARY["기준열"])
     details("**매칭 방법**\n"
             "- **정확히 일치**: 열 이름이 기준열과 같습니다. 띄어쓰기·대소문자·기호 차이는 무시합니다.\n"
@@ -590,11 +760,16 @@ def on_keep_change(key: str, file: str, row: int) -> None:
 
 
 def render_duplicates(result, res) -> None:
-    ss = st.session_state
     groups = result.dup_groups()
     if not groups:
         return
-    step("5. 중복 행 고르기", "중복 그룹마다 결과에 남길 행을 고릅니다. 기본은 전부 남김입니다.",
+    with st.container(border=True, key="card_duplicates"):
+        render_duplicate_groups(result, res, groups)
+
+
+def render_duplicate_groups(result, res, groups) -> None:
+    ss = st.session_state
+    step(5, "중복 행 고르기", "중복 그룹마다 결과에 남길 행을 고릅니다. 기본은 전부 남김입니다.",
          help=GLOSSARY["중복 그룹"])
     details("- 체크를 끈 행은 취합결과에서 빠지고, **'제외된 행' 시트**에 원래 값 그대로 기록됩니다.\n"
             "- 그룹에 한 행만 남으면 그 행의 중복 오류는 **'중복 해소'**로 처리됩니다.\n"
@@ -691,57 +866,64 @@ def prune_outputs() -> None:
 def render_result() -> None:
     result = st.session_state.result
     res = current_resolution()
-    step("4. 실행 결과", "찾은 오류를 종류별로 셉니다. 직접 확인할 건수는 '남은 오류'입니다.")
     fixes = result.suggestion_map()
     total, done, remaining = res.totals()
-
-    top = st.columns(4)
-    with top[0].container(border=True):
-        st.metric("남은 오류", f"{remaining:,}건", help=GLOSSARY["남은 오류"])
-    top[1].metric("전체 오류", f"{total:,}건", help=GLOSSARY["전체 오류"])
-    top[2].metric("처리됨", f"{done:,}건", help=GLOSSARY["처리됨"])
-    top[3].metric("제외한 행", f"{len(res.excluded):,}개", help="중복 행 고르기에서 결과에서 뺀 행의 수입니다.")
-    info = st.columns(4)
-    info[0].metric("파일 수", f"{len(result.plans)}개")
-    info[1].metric("취합 행 수", f"{len(result.rows) - len(res.excluded):,}행")
-    info[2].metric("수정 제안 있음", f"{len(fixes):,}건", help=GLOSSARY["수정 제안값"])
-    details("**오류 종류**\n"
-            "- **필수값 빈칸**: 꼭 있어야 하는 칸이 비어 있습니다.\n"
-            "- **형식 오류**: 숫자 칸에 글자가 있거나(예: '12개'), 없는 날짜입니다(예: 13월).\n"
-            "- **범위 밖 값**: 정해진 범위를 벗어났습니다(예: 음수 수량).\n"
-            "- **허용값 아닌 값**: 정해진 값 목록에 없습니다(예: 'OK', '합격 ').\n"
-            "- **중복 행**: 중복기준 열의 값이 같은 행이 둘 이상 있습니다. 다른 파일끼리도 찾습니다.")
-    st.dataframe(pd.DataFrame([{"오류 종류": k, "전체": t, "처리됨": d, "남은 오류": r}
-                               for k, (t, d, r) in res.counts().items()]),
-                 hide_index=True, key="kind_table")
+    with st.container(border=True, key="card_result"):
+        step(4, "실행 결과", "찾은 오류를 종류별로 셉니다. 직접 확인할 건수는 '남은 오류'입니다.")
+        top = st.columns(4)
+        with top[0].container(key="metric_remaining"):
+            st.metric("남은 오류", f"{remaining:,}건", help=GLOSSARY["남은 오류"], border=True)
+        top[1].metric("전체 오류", f"{total:,}건", help=GLOSSARY["전체 오류"], border=True)
+        top[2].metric("처리됨", f"{done:,}건", help=GLOSSARY["처리됨"], border=True)
+        top[3].metric("제외한 행", f"{len(res.excluded):,}개", help="중복 행 고르기에서 결과에서 뺀 행의 수입니다.",
+                      border=True)
+        info = st.columns(4)
+        info[0].metric("파일 수", f"{len(result.plans)}개")
+        info[1].metric("취합 행 수", f"{len(result.rows) - len(res.excluded):,}행")
+        info[2].metric("수정 제안 있음", f"{len(fixes):,}건", help=GLOSSARY["수정 제안값"])
+        details("**오류 종류**\n"
+                "- **필수값 빈칸**: 꼭 있어야 하는 칸이 비어 있습니다.\n"
+                "- **형식 오류**: 숫자 칸에 글자가 있거나(예: '12개'), 없는 날짜입니다(예: 13월).\n"
+                "- **범위 밖 값**: 정해진 범위를 벗어났습니다(예: 음수 수량).\n"
+                "- **허용값 아닌 값**: 정해진 값 목록에 없습니다(예: 'OK', '합격 ').\n"
+                "- **중복 행**: 중복기준 열의 값이 같은 행이 둘 이상 있습니다. 다른 파일끼리도 찾습니다.")
+        st.dataframe(pd.DataFrame([{"오류 종류": k, "전체": t, "처리됨": d, "남은 오류": r}
+                                   for k, (t, d, r) in res.counts().items()]),
+                     hide_index=True, key="kind_table")
 
     render_duplicates(result, res)
 
-    step("6. 결과 엑셀 받기", "오류를 색칠한 결과 엑셀을 내려받습니다. 올린 파일은 바뀌지 않습니다.")
-    details("**결과 엑셀의 시트**\n"
-            "- **취합결과**: 모은 데이터. 출처 파일과 원래 행 번호가 붙고, 오류 칸은 종류별 색으로 칠합니다.\n"
-            "- **오류목록**: 오류 하나당 한 줄. 파일, 행, 열, 오류 종류, 값, 설명, 수정 제안값, 중복 그룹, 처리.\n"
-            "- **제외된 행**: 중복 행 고르기에서 뺀 행 (뺀 행이 있을 때만).\n"
-            "- **요약**: 오류 종류별 전체 / 처리됨 / 남은 오류.\n"
-            "- **범례**: 색의 뜻.")
-    if "apply_suggestions" not in st.session_state:
-        st.session_state.apply_suggestions = st.session_state.apply_pref
-    applied = st.checkbox(
-        "수정 제안값 일괄 적용", key="apply_suggestions", on_change=on_apply_change,
-        help="켜면 결과 엑셀의 오류 셀 중 수정 제안값이 있는 셀을 제안값으로 바꾸고 초록색으로 표시합니다. "
-             "오류목록에는 '처리' 열에 '자동 수정됨'으로 남습니다. 원본 파일은 바뀌지 않습니다.")
-    if applied:
-        st.caption(f"제안값이 있는 {len(fixes):,}개 셀을 바꿔서 저장합니다. 나머지 오류 셀은 원래 값 그대로입니다.")
-    else:
-        st.caption("오류 셀은 원래 값 그대로 두고 색만 칠해서 저장합니다.")
-    if res.excluded:
-        st.caption(f"중복 그룹에서 뺀 {len(res.excluded):,}개 행은 '제외된 행' 시트로 옮겨 저장합니다.")
-    path = output_for(res)
-    if path is not None and path.is_file():
-        st.download_button("결과 엑셀 내려받기", data=path.read_bytes(), file_name=path.name,
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           key="download", type="primary", on_click="ignore")
+    with st.container(border=True, key="card_download"):
+        step(6, "결과 엑셀 받기", "오류를 색칠한 결과 엑셀을 내려받습니다. 올린 파일은 바뀌지 않습니다.")
+        details("**결과 엑셀의 시트**\n"
+                "- **취합결과**: 모은 데이터. 출처 파일과 원래 행 번호가 붙고, 오류 칸은 종류별 색으로 칠합니다.\n"
+                "- **오류목록**: 오류 하나당 한 줄. 파일, 행, 열, 오류 종류, 값, 설명, 수정 제안값, 중복 그룹, 처리.\n"
+                "- **제외된 행**: 중복 행 고르기에서 뺀 행 (뺀 행이 있을 때만).\n"
+                "- **요약**: 오류 종류별 전체 / 처리됨 / 남은 오류.\n"
+                "- **범례**: 색의 뜻.")
+        if "apply_suggestions" not in st.session_state:
+            st.session_state.apply_suggestions = st.session_state.apply_pref
+        applied = st.checkbox(
+            "수정 제안값 일괄 적용", key="apply_suggestions", on_change=on_apply_change,
+            help="켜면 결과 엑셀의 오류 셀 중 수정 제안값이 있는 셀을 제안값으로 바꾸고 초록색으로 표시합니다. "
+                 "오류목록에는 '처리' 열에 '자동 수정됨'으로 남습니다. 원본 파일은 바뀌지 않습니다.")
+        if applied:
+            st.caption(f"제안값이 있는 {len(fixes):,}개 셀을 바꿔서 저장합니다. 나머지 오류 셀은 원래 값 그대로입니다.")
+        else:
+            st.caption("오류 셀은 원래 값 그대로 두고 색만 칠해서 저장합니다.")
+        if res.excluded:
+            st.caption(f"중복 그룹에서 뺀 {len(res.excluded):,}개 행은 '제외된 행' 시트로 옮겨 저장합니다.")
+        path = output_for(res)
+        if path is not None and path.is_file():
+            st.download_button("결과 엑셀 내려받기", data=path.read_bytes(), file_name=path.name,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="download", type="primary", on_click="ignore")
 
+    with st.container(border=True, key="card_issues"):
+        render_issue_list(result, res, remaining)
+
+
+def render_issue_list(result, res, remaining: int) -> None:
     st.subheader("오류 목록")
     counts = result.counts()
     present = [k for k in KINDS if counts[k]]
@@ -764,13 +946,14 @@ def render_result() -> None:
 def main() -> None:
     st.set_page_config(page_title="엑셀 자동 취합·검증기", page_icon=":material/table_chart:", layout="wide")
     init_state()
-    ss = st.session_state
 
     render_sidebar()
-    st.title("엑셀 자동 취합·검증기")
-    # 첫 화면에서 "샘플 파일로 바로 체험" 버튼이 스크롤 없이 보이도록, 안내는 두 줄만 둔다
-    st.markdown("양식이 제각각인 엑셀 파일을 하나로 모으고, 오류를 자동으로 찾아 표시합니다.\n\n"
-                "**30초 체험:** ① 샘플 파일로 바로 체험 → ② 열 매칭 확인 → ③ 취합·검증 실행 → ④ 결과 엑셀 받기")
+    st.html(APP_CSS)
+    with st.container(key="brand"):
+        st.title("엑셀 자동 취합·검증기")
+    # 첫 화면(1280×720, 휴대폰 375×812)에서 "샘플 파일로 바로 체험" 버튼이 스크롤 없이 보이도록
+    # 히어로는 짧게 두고, 작동 흐름 띠는 버튼 아래에 둔다
+    st.html(hero_html(len(KINDS), load_test_count()))
 
     # ---- 1. 시나리오
     try:
@@ -782,8 +965,17 @@ def main() -> None:
         st.error("scenarios 폴더에 시나리오 설정 파일(.yaml)이 없습니다.")
         st.stop()
     by_key = {s.key: s for s in scenarios}
+    with st.container(border=True, key="card_scenario"):
+        scenario = render_scenario_card(by_key)
+    st.html(flow_html(len(KINDS)))
+    render_steps_after_scenario(scenario)
+    render_footer()
 
-    step("1. 시나리오 선택", "어떤 종류의 엑셀을 모을지 고르고, 샘플로 바로 체험해 보세요.")
+
+def render_scenario_card(by_key: dict):
+    """1단계: 시나리오 선택 + 샘플·AI 체험 버튼 + 접어 둔 설명. 고른 시나리오를 돌려준다."""
+    ss = st.session_state
+    step(1, "시나리오 선택", "어떤 종류의 엑셀을 모을지 고르고, 샘플로 바로 체험해 보세요.")
     key = st.selectbox("어떤 엑셀을 취합하나요?", list(by_key), key="scenario",
                        format_func=lambda k: by_key[k].name, on_change=on_scenario_change,
                        help=scenario_help(by_key))
@@ -834,33 +1026,39 @@ def main() -> None:
             "형식, 허용값, 중복기준이 들어 있습니다.\n"
             "- **샘플 파일로 바로 체험**: 이 시나리오의 샘플 엑셀을 올린 것처럼 불러옵니다. 샘플에는 일부러 오류를 넣어 두었습니다.\n"
             "- **AI 매칭 체험**: 열 이름이 동의어 사전에 없는 파일입니다. AI 추천으로 열을 맞추는 과정을 볼 수 있습니다.")
+    return scenario
 
+
+def render_steps_after_scenario(scenario) -> None:
+    """2단계(업로드)부터 결과까지. 파일이 없으면 안내만 보여주고 끝낸다."""
+    ss = st.session_state
     # ---- 2. 업로드
-    step("2. 엑셀 파일 올리기", "모을 엑셀 파일(.xlsx)을 한 번에 여러 개 올립니다.")
-    for note in LIMIT_NOTES:   # 관리자 설정(secrets·환경변수)이 잘못된 경우
-        st.caption(f"설정 안내: {md(note)}")
-    uploads = st.file_uploader("취합할 엑셀 파일(.xlsx)을 모두 골라 올려 주세요.", type=["xlsx", "xlsm"],
-                               accept_multiple_files=True, key=f"uploader_{ss.uploader_n}")
-    sig = tuple((u.file_id, u.name, u.size) for u in uploads) if uploads else None
-    if sig != ss.upload_sig:
-        ss.upload_sig = sig
-        if sig:
-            err = upload_batch_error([u.size for u in uploads])   # 파일 내용을 꺼내기 전에 검사
-            if err:
+    with st.container(border=True, key="card_upload"):
+        step(2, "엑셀 파일 올리기", "모을 엑셀 파일(.xlsx)을 한 번에 여러 개 올립니다.")
+        for note in LIMIT_NOTES:   # 관리자 설정(secrets·환경변수)이 잘못된 경우
+            st.caption(f"설정 안내: {md(note)}")
+        uploads = st.file_uploader("취합할 엑셀 파일(.xlsx)을 모두 골라 올려 주세요.", type=["xlsx", "xlsm"],
+                                   accept_multiple_files=True, key=f"uploader_{ss.uploader_n}")
+        sig = tuple((u.file_id, u.name, u.size) for u in uploads) if uploads else None
+        if sig != ss.upload_sig:
+            ss.upload_sig = sig
+            if sig:
+                err = upload_batch_error([u.size for u in uploads])   # 파일 내용을 꺼내기 전에 검사
+                if err:
+                    reset_from("files")
+                    say("error", err)
+                else:
+                    load_files(scenario, [(u.name, u.getvalue()) for u in uploads], "upload")
+            elif ss.load_source == "upload":
                 reset_from("files")
-                say("error", err)
-            else:
-                load_files(scenario, [(u.name, u.getvalue()) for u in uploads], "upload")
-        elif ss.load_source == "upload":
-            reset_from("files")
-    with st.expander("자세히 보기"):
-        st.caption(f"제한: 한 번에 최대 {MAX_FILES}개 · 파일당 {MAX_FILE_BYTES // MB}MB · "
-                   f"합계 {MAX_TOTAL_UPLOAD_BYTES // MB}MB · 파일당 {MAX_ROWS:,}행 · "
-                   f"모든 파일 합계 {MAX_TOTAL_ROWS:,}행 · 단계마다 처리 시간 {TIME_LIMIT}초")
-        st.markdown("- 열 이름·열 순서·날짜 표기가 파일마다 달라도 괜찮습니다.\n"
-                    "- 위쪽에 제목 줄이 있어도 머리글 행을 자동으로 찾습니다.\n"
-                    "- 올린 파일은 바꾸지 않습니다. 결과는 새 엑셀 파일로 만듭니다.\n"
-                    "- .xls 파일은 엑셀에서 .xlsx로 다시 저장해서 올려 주세요.")
+        with st.expander("자세히 보기"):
+            st.caption(f"제한: 한 번에 최대 {MAX_FILES}개 · 파일당 {MAX_FILE_BYTES // MB}MB · "
+                       f"합계 {MAX_TOTAL_UPLOAD_BYTES // MB}MB · 파일당 {MAX_ROWS:,}행 · "
+                       f"모든 파일 합계 {MAX_TOTAL_ROWS:,}행 · 단계마다 처리 시간 {TIME_LIMIT}초")
+            st.markdown("- 열 이름·열 순서·날짜 표기가 파일마다 달라도 괜찮습니다.\n"
+                        "- 위쪽에 제목 줄이 있어도 머리글 행을 자동으로 찾습니다.\n"
+                        "- 올린 파일은 바꾸지 않습니다. 결과는 새 엑셀 파일로 만듭니다.\n"
+                        "- .xls 파일은 엑셀에서 .xlsx로 다시 저장해서 올려 주세요.")
     show_messages()
 
     if not ss.plans:
@@ -869,11 +1067,11 @@ def main() -> None:
     src = {"sample": "샘플 파일", "demo": "AI 매칭 체험 파일"}.get(ss.load_source, "올린 파일")
     st.success(f"{src} {len(ss.plans)}개를 읽었습니다.")
 
-    # ---- 3. 매칭
-    render_matching(scenario)
-
-    # ---- 4. 실행
-    if st.button("취합·검증 실행", key="run_btn", type="primary"):
+    # ---- 3. 매칭 + 실행 버튼 (확인이 끝나면 같은 카드 안에서 바로 실행)
+    with st.container(border=True, key="card_matching"):
+        render_matching(scenario)
+        run_clicked = st.button("취합·검증 실행", key="run_btn", type="primary")
+    if run_clicked:
         run_merge(scenario)
         show_messages()
     if ss.result is not None:
