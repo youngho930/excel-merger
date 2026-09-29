@@ -96,6 +96,16 @@ class MergeResult:
         c = Counter(i.kind for i in self.issues)
         return {k: c.get(k, 0) for k in KINDS}
 
+    def dup_count_text(self) -> str:
+        """중복 행 건수를 행 수와 그룹 수로: '6행 (3쌍)'. 세 행 이상인 그룹이 있으면 '7행 (3그룹)'.
+
+        오류 건수는 행 기준(그룹의 모든 행을 센다)이고, 정답지는 쌍 기준이라 숫자가 달라 보인다.
+        """
+        dups = [i for i in self.issues if i.kind == DUPLICATE]
+        sizes = Counter(i.dup_group for i in dups)
+        unit = "쌍" if all(n == 2 for n in sizes.values()) else "그룹"
+        return f"{len(dups):,}행 ({len(sizes):,}{unit})"
+
     def suggestion_map(self) -> dict[tuple[str, int, str], Any]:
         """셀 단위 오류 중 수정 제안값이 있는 것: (파일, 행, 기준명) -> 제안값.
 

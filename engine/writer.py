@@ -6,7 +6,7 @@
    "처리" 열은 항상 있다 (양식이 매번 같도록). 처리하지 않은 오류는 빈칸이고,
    처리한 오류는 "자동 수정됨" / "행 제외됨" / "중복 해소(이 행을 남김)".
 3. "제외된 행": 사용자가 중복 그룹에서 뺀 행의 기록 (뺀 행이 있을 때만).
-4. "요약": 파일 수, 행 수, 제외한 행 수, 오류 종류별 전체 / 처리됨 / 남은 오류.
+4. "요약": 파일 수, 행 수, 제외한 행 수, 중복 행(행 수와 쌍 수), 오류 종류별 전체 / 처리됨 / 남은 오류 (행 기준).
 5. "범례": 색의 뜻. 오류목록과 섞이지 않게 따로 둔다 (pandas로 읽을 때 이름 없는 열이 생기지 않도록).
 
 apply_suggestions=True 이면 수정 제안값이 있는 오류 셀을 제안값으로 바꾸고 초록색으로 칠한다.
@@ -40,7 +40,8 @@ SOURCE_COLS = ["출처 파일", "원래 행"]
 ACTION_COL = "처리"
 ERROR_COLS = ["파일", "행", "열", "기준열", "오류 종류", "값", "설명", "수정 제안값", "중복 그룹", ACTION_COL]
 EXCLUDED_EXTRA_COLS = ["중복 그룹", "오류"]
-SUMMARY_KIND_COLS = ["오류 종류", "전체", "처리됨", "남은 오류"]
+SUMMARY_KIND_COLS = ["오류 종류", "전체", "처리됨", "남은 오류", "비고"]
+DUP_BASIS_NOTE = "행 기준: 중복 행은 서로 같은 행을 모두 셉니다 (2행이 1쌍). 쌍 수는 비고와 위쪽 '중복 행'에 있습니다."
 
 COLORS = {
     REQUIRED: "FFC7CE",   # 연한 빨강
@@ -259,20 +260,22 @@ def write_result(result: MergeResult, out_dir: str | Path = "output",
 
     # ---- 시트 4: 요약
     ss = wb.create_sheet(SUMMARY_SHEET)
-    _set_widths(ss, [22, 10, 10, 12])
+    _set_widths(ss, [22, 10, 10, 12, 48])
     total, done, remaining = res.totals()
     for label, value in [("파일 수", len(result.plans)),
                          ("읽은 데이터 행 수", len(result.rows)),
                          ("제외한 행 수", len(dropped)),
                          ("취합결과 행 수", len(kept)),
+                         ("중복 행", result.dup_count_text()),
                          ("수정 제안값 일괄 적용", "예" if apply_suggestions else "아니오")]:
         ss.append([_cell(ss, label, bold=True), _cell(ss, value)])
     ss.append([])
     ss.append([_cell(ss, h, bold=True) for h in SUMMARY_KIND_COLS])
     for k, (t, d, r) in res.counts().items():
-        ss.append([_cell(ss, k, FILLS[k]), _cell(ss, t), _cell(ss, d), _cell(ss, r, bold=r > 0)])
+        note = [_cell(ss, result.dup_count_text())] if k == DUPLICATE else []
+        ss.append([_cell(ss, k, FILLS[k]), _cell(ss, t), _cell(ss, d), _cell(ss, r, bold=r > 0)] + note)
     ss.append([_cell(ss, "합계", bold=True), _cell(ss, total, bold=True), _cell(ss, done, bold=True),
-               _cell(ss, remaining, bold=True)])
+               _cell(ss, remaining, bold=True), _cell(ss, DUP_BASIS_NOTE)])
     ss.append([])
     ss.append([_cell(ss, "처리됨: 오류목록의 '처리' 열에 내용이 있는 오류. 남은 오류 = 전체 - 처리됨. "
                          "확인이 필요한 것은 '남은 오류'입니다.")])

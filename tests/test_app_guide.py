@@ -29,12 +29,13 @@ def visible_text(html: str) -> str:
 def test_intro_is_short_and_shows_the_flow():
     at = first_screen()
     hero = next(b for b in html_bodies(at) if 'class="xm-hero"' in b)
-    # 두 줄 제목 + 부제 한두 문장. 첫 안내가 길어지면 버튼이 첫 화면 밖으로 밀린다
+    # 두 줄 제목 + 부제 세 문장 이내. 첫 안내가 길어지면 버튼이 첫 화면 밖으로 밀린다
     assert "양식이 제각각인 엑셀,<br>" in hero and "오류까지" in hero
     # 두 번째 줄은 "오류까지"만 강조색 ("취합"은 본문 글자색)
     assert "한 번에 취합하고 <em>오류까지</em>" in hero and re.findall(r"<em>(.*?)</em>", hero) == ["오류까지"]
     sub = re.search(r'<p class="xm-sub">(.*?)</p>', hero).group(1)
-    assert len(sub) <= 120 and sub.count(".") <= 2
+    assert len(sub) <= 120 and sub.count(".") <= 3
+    assert sub.endswith("정해진 양식이 없어도 원하는 열과 순서를 골라 취합할 수 있습니다.")   # 자유 양식
     for chip in ("Python", "Streamlit", "Gemini AI", "openpyxl"):
         assert f">{chip}</li>" in hero
     # 작동 흐름 5단계가 순서대로 (이전의 "30초 체험" 안내를 대신한다)

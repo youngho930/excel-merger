@@ -164,8 +164,9 @@ APP_CSS = """<style>
 .xm-wrap .xm-stats { padding-left: 1.25rem !important; }
 @container (max-width: 640px) {
   .xm-hero { grid-template-columns: minmax(0, 1fr); gap: 0.6rem; }
-  .xm-chips { margin-bottom: 0.6rem; }
-  .xm-sub { font-size: 0.875rem; line-height: 1.5; margin-top: 0.45rem; }
+  .xm-chips { margin-bottom: 0.4rem; }
+  /* 부제 세 문장: 390px 에서도 체험 버튼이 첫 화면(844px) 안에 들어오도록 조금 작게 */
+  .xm-sub { font-size: 0.8125rem; line-height: 1.45; margin-top: 0.45rem; }
   /* 모바일: 숫자 카드 3개를 가로 한 줄(3칸)로 작게. 설명은 두 줄까지 */
   .xm-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0.45rem 0.25rem; }
   .xm-wrap .xm-stats { padding-left: 0.25rem !important; }
@@ -247,7 +248,7 @@ HERO_TEMPLATE = """<div class="xm-wrap"><section class="xm-hero" aria-label="소
 <div class="xm-hero-text">
 <ul class="xm-chips" aria-label="사용 기술"><li>Python</li><li>Streamlit</li><li class="xm-ai">Gemini AI</li><li>openpyxl</li></ul>
 <h2 class="xm-title">양식이 제각각인 엑셀,<br>한 번에 취합하고 <em>오류까지</em></h2>
-<p class="xm-sub">부서·협력사·지점마다 다른 엑셀 파일을 하나로 모으고, 빈칸·형식·중복 같은 오류를 자동으로 찾아 표시합니다. 원본 파일은 그대로 둡니다.</p>
+<p class="xm-sub">부서·협력사·지점마다 다른 엑셀 파일을 하나로 모으고, 빈칸·형식·중복 같은 오류를 자동으로 찾아 표시합니다. 원본 파일은 그대로 둡니다. 정해진 양식이 없어도 원하는 열과 순서를 골라 취합할 수 있습니다.</p>
 </div>
 <div class="xm-stats-col">
 <ul class="xm-stats" aria-label="숫자로 보는 특징">
@@ -1578,7 +1579,10 @@ def render_result() -> None:
         top = st.columns(4)
         with top[0].container(key="metric_remaining"):
             st.metric("남은 오류", f"{remaining:,}건", help=GLOSSARY["남은 오류"], border=True)
-        top[1].metric("전체 오류", f"{total:,}건", help=GLOSSARY["전체 오류"], border=True)
+        with top[1].container(key="metric_total"):
+            st.metric("전체 오류", f"{total:,}건", help=GLOSSARY["전체 오류"], border=True)
+            st.caption("행 기준", help="중복 행은 서로 같은 행을 모두 셉니다(2행이 1쌍). "
+                                     "그래서 쌍으로 세는 정답지보다 숫자가 클 수 있습니다.")
         top[2].metric("처리됨", f"{done:,}건", help=GLOSSARY["처리됨"], border=True)
         top[3].metric("제외한 행", f"{len(res.excluded):,}개", help="중복 행 고르기에서 결과에서 뺀 행의 수입니다.",
                       border=True)
@@ -1587,6 +1591,8 @@ def render_result() -> None:
         info[1].metric("취합 행 수", f"{len(result.rows) - len(res.excluded):,}행")
         if not free:
             info[2].metric("수정 제안 있음", f"{len(fixes):,}건", help=GLOSSARY["수정 제안값"])
+        info[3].metric("중복 행", result.dup_count_text(),
+                       help="중복으로 표시한 행 수와, 서로 같은 행끼리 묶은 쌍(중복 그룹) 수입니다.")
         details("**오류 종류**\n"
                 "- **필수값 빈칸**: 꼭 있어야 하는 칸이 비어 있습니다.\n"
                 "- **형식 오류**: 숫자 칸에 글자가 있거나(예: '12개'), 없는 날짜입니다(예: 13월).\n"
@@ -1605,7 +1611,7 @@ def render_result() -> None:
                 "- **취합결과**: 모은 데이터. 출처 파일과 원래 행 번호가 붙고, 오류 칸은 종류별 색으로 칠합니다.\n"
                 "- **오류목록**: 오류 하나당 한 줄. 파일, 행, 열, 오류 종류, 값, 설명, 수정 제안값, 중복 그룹, 처리.\n"
                 "- **제외된 행**: 중복 행 고르기에서 뺀 행 (뺀 행이 있을 때만).\n"
-                "- **요약**: 오류 종류별 전체 / 처리됨 / 남은 오류.\n"
+                "- **요약**: 중복 행(행 수와 쌍 수), 오류 종류별 전체 / 처리됨 / 남은 오류(행 기준).\n"
                 "- **범례**: 색의 뜻.")
         applied = False
         if not free:
