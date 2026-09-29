@@ -346,7 +346,7 @@ def check_choices(groups: Sequence[ColumnGroup], choices: Sequence[ColumnChoice]
             problems.append(f"결과 열 이름 '{name}'은 결과 파일이 쓰는 '{reserved[key]}' 열과 겹쳐 쓸 수 없습니다.")
             continue
         if key in seen:
-            problems.append(f"결과 열 이름 '{name}'이 두 번 쓰였습니다 ('{seen[key]}'과 공백·대소문자·기호만 다름). "
+            problems.append(f"결과 열 이름 '{name}'이(가) 두 번 쓰였습니다 ('{seen[key]}'과(와) 공백·대소문자·기호만 다름). "
                             "다른 이름을 적어 주세요.")
             continue
         seen[key] = name
