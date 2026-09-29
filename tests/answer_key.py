@@ -92,3 +92,28 @@ def run_merge_main(argv: list[str]) -> tuple[int, str]:
     with contextlib.redirect_stdout(buf):
         code = module.main(argv)
     return code, buf.getvalue()
+
+
+# ------------------------------------------------------------------ 자유 양식 정답지 (기존 37건과 별개)
+FREE_ANSWER_JSON = ROOT / "samples" / "free_form_expected_errors.json"
+
+
+def load_free_answer() -> dict:
+    return json.loads(FREE_ANSWER_JSON.read_text(encoding="utf-8"))
+
+
+def free_form_scenario(config: dict, tables, key: str = "free_form"):
+    """정답지의 config(결과 열·묶을 원본 이름·필수·중복기준)대로 자유 양식 Scenario 를 만든다.
+
+    화면에서 사용자가 하는 일(묶기 -> 열 고르기 -> 날짜 판단)을 그대로 따른다.
+    """
+    from engine.free_form import USER, ColumnChoice, build_scenario, check_dates, regroup
+    from engine.normalize import normalize_header
+
+    merges = [({normalize_header(s) for s in c["sources"]}, USER) for c in config["columns"] if len(c["sources"]) > 1]
+    groups = regroup(tables, merges)
+    by_norm = {n: g for g in groups for n in g.norms}
+    choices = [ColumnChoice(by_norm[normalize_header(c["sources"][0])].gid, c["name"], c["required"], c["dup"])
+               for c in config["columns"]]
+    dates = {g.gid for g in groups if check_dates(tables, g).is_date}
+    return build_scenario(groups, choices, dates, name=config["name"], key=key), groups

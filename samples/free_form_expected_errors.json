@@ -1,0 +1,222 @@
+{
+  "version": 1,
+  "note": "샘플의 이름·전화번호·주문번호는 모두 가상입니다. 실제 인물과 관계없습니다.",
+  "folder": "free_form",
+  "config": {
+    "name": "대리점·채널별 AS 접수 내역",
+    "columns": [
+      {
+        "name": "접수일",
+        "sources": [
+          "접수일",
+          "등록일"
+        ],
+        "required": true,
+        "dup": true
+      },
+      {
+        "name": "접수번호",
+        "sources": [
+          "접수번호"
+        ],
+        "required": false,
+        "dup": false
+      },
+      {
+        "name": "고객명",
+        "sources": [
+          "고객명",
+          "성명",
+          "고객 명"
+        ],
+        "required": true,
+        "dup": false
+      },
+      {
+        "name": "연락처",
+        "sources": [
+          "연락처",
+          "전화번호"
+        ],
+        "required": true,
+        "dup": true
+      },
+      {
+        "name": "제품명",
+        "sources": [
+          "제품명",
+          "모델"
+        ],
+        "required": true,
+        "dup": true
+      },
+      {
+        "name": "증상",
+        "sources": [
+          "증상",
+          "고장내용"
+        ],
+        "required": false,
+        "dup": false
+      },
+      {
+        "name": "담당기사",
+        "sources": [
+          "담당기사"
+        ],
+        "required": false,
+        "dup": false
+      },
+      {
+        "name": "주문번호",
+        "sources": [
+          "주문번호"
+        ],
+        "required": false,
+        "dup": false
+      }
+    ]
+  },
+  "files": [
+    {
+      "file": "AS접수_강남대리점.xlsx",
+      "header_row": 1,
+      "data_rows": 12,
+      "columns": [
+        "접수번호",
+        "접수일",
+        "고객명",
+        "연락처",
+        "제품명",
+        "증상",
+        "담당기사"
+      ]
+    },
+    {
+      "file": "AS접수_콜센터.xlsx",
+      "header_row": 3,
+      "data_rows": 12,
+      "columns": [
+        "등록일",
+        "성명",
+        "전화번호",
+        "모델",
+        "고장내용",
+        "접수번호"
+      ]
+    },
+    {
+      "file": "AS접수_온라인몰.xlsx",
+      "header_row": 1,
+      "data_rows": 10,
+      "columns": [
+        "접수번호",
+        "주문번호",
+        "고객 명",
+        "연락처",
+        "제품명",
+        "증상",
+        "접수일"
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "file": "AS접수_강남대리점.xlsx",
+      "row": 5,
+      "column": "고객명",
+      "standard": "고객명",
+      "kind": "필수값 빈칸",
+      "value": null,
+      "shown": "(빈칸)",
+      "description": "필수 열 '고객명'이(가) 비어 있음",
+      "duplicate_of": null
+    },
+    {
+      "file": "AS접수_강남대리점.xlsx",
+      "row": 9,
+      "column": "연락처",
+      "standard": "연락처",
+      "kind": "필수값 빈칸",
+      "value": null,
+      "shown": "(빈칸)",
+      "description": "필수 열 '연락처'이(가) 비어 있음",
+      "duplicate_of": null
+    },
+    {
+      "file": "AS접수_콜센터.xlsx",
+      "row": 7,
+      "column": "(행 전체)",
+      "standard": "접수일 + 연락처 + 제품명",
+      "kind": "중복 행",
+      "value": null,
+      "shown": "접수일=2026-09-03, 연락처=010-0000-1005, 제품명=건조기 DR-1200",
+      "description": "AS접수_강남대리점.xlsx 6행과 중복기준 값이 같음",
+      "duplicate_of": {
+        "file": "AS접수_강남대리점.xlsx",
+        "row": 6
+      }
+    },
+    {
+      "file": "AS접수_콜센터.xlsx",
+      "row": 8,
+      "column": "성명",
+      "standard": "고객명",
+      "kind": "필수값 빈칸",
+      "value": null,
+      "shown": "(빈칸)",
+      "description": "필수 열 '고객명'이(가) 비어 있음",
+      "duplicate_of": null
+    },
+    {
+      "file": "AS접수_콜센터.xlsx",
+      "row": 11,
+      "column": "모델",
+      "standard": "제품명",
+      "kind": "필수값 빈칸",
+      "value": null,
+      "shown": "(빈칸)",
+      "description": "필수 열 '제품명'이(가) 비어 있음",
+      "duplicate_of": null
+    },
+    {
+      "file": "AS접수_온라인몰.xlsx",
+      "row": 4,
+      "column": "(행 전체)",
+      "standard": "접수일 + 연락처 + 제품명",
+      "kind": "중복 행",
+      "value": null,
+      "shown": "접수일=2026-09-05, 연락처=010-0000-1009, 제품명=에어컨 AC-3300",
+      "description": "AS접수_강남대리점.xlsx 10행과 중복기준 값이 같음",
+      "duplicate_of": {
+        "file": "AS접수_강남대리점.xlsx",
+        "row": 10
+      }
+    },
+    {
+      "file": "AS접수_온라인몰.xlsx",
+      "row": 6,
+      "column": "접수일",
+      "standard": "접수일",
+      "kind": "필수값 빈칸",
+      "value": null,
+      "shown": "(빈칸)",
+      "description": "필수 열 '접수일'이(가) 비어 있음",
+      "duplicate_of": null
+    },
+    {
+      "file": "AS접수_온라인몰.xlsx",
+      "row": 7,
+      "column": "(행 전체)",
+      "standard": "접수일 + 연락처 + 제품명",
+      "kind": "중복 행",
+      "value": null,
+      "shown": "접수일=2026-09-08, 연락처=010-0000-2010, 제품명=세탁기 WM-2400",
+      "description": "AS접수_콜센터.xlsx 13행과 중복기준 값이 같음",
+      "duplicate_of": {
+        "file": "AS접수_콜센터.xlsx",
+        "row": 13
+      }
+    }
+  ]
+}
