@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -29,7 +30,7 @@ from engine import limits as limits_mod
 from engine.jobs import JobError, TimeLimitError, run_job, set_max_concurrent
 from engine import free_form as ff
 from engine.matching import AI, USER
-from engine.normalize import DATE, display
+from engine.normalize import DATE, display, normalize_header
 from engine.reader import EXCEL_SUFFIXES, HEADER_SCAN_ROWS, read_table
 from engine.writer import ACTION_COL, ERROR_COLS
 
@@ -671,6 +672,8 @@ def load_files(scenario, items: list[tuple[str, Any]], source: str) -> None:
     ss.map_error = None
     if scenario is None:
         init_free_state(tables, paths)
+        if source == "free_demo":
+            apply_free_demo_preset(tables)
 
 
 def sample_files(scenario) -> list[Path]:
@@ -898,9 +901,37 @@ def init_free_state(tables, paths) -> None:
     ss.ff_tables_ver = 0         # 파일을 다시 읽을 때마다 늘린다 (날짜 판단 캐시 키)
     ss.ff_date_cache = {}
     ss.ff_gid_norms = {}
-    ss.ff_known = set()
+    ss.ff_removed = set()        # 사용자가 "결과에 넣을 열"에서 직접 뺀 열의 정규화 이름 (이것만 결과에서 뺀다)
     ss.ff_form_name = ff.DEFAULT_NAME
     ss.ff_file_key = f"free_form_{time.strftime('%Y%m%d')}"
+
+
+FREE_DEMO_ANSWER = SAMPLE_DIR / "free_form_expected_errors.json"   # 자유 양식 체험의 정답지 (필수·중복 설정 포함)
+
+
+def free_demo_preset() -> list[dict]:
+    """체험 정답지의 열 설정 [{name, required, dup}] (없거나 형식이 이상하면 빈 목록)."""
+    try:
+        cols = json.loads(FREE_DEMO_ANSWER.read_text(encoding="utf-8"))["config"]["columns"]
+        return [{"name": str(c["name"]), "required": bool(c["required"]), "dup": bool(c["dup"])} for c in cols]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
+def apply_free_demo_preset(tables) -> None:
+    """'자유 양식 체험'으로 들어온 경우에만: 정답지에 맞게 필수·중복 판단 기준을 미리 켜 둔다.
+
+    기준 이름과 같은 묶음(예: 접수일)에만 켠다. 짝 열(등록일)은 사용자가 묶으면 그 설정을 이어받는다.
+    짝 열까지 켜면 묶기 전에는 중복기준에 서로 다른 열이 여럿 들어가 모든 파일이 중복 검사에서 빠진다.
+    직접 올린 파일에는 아무것도 켜지 않는다.
+    """
+    by_norm = {g.norms: g for g in ff.group_headers(tables)}
+    for col in free_demo_preset():
+        g = by_norm.get((normalize_header(col["name"]),))
+        if g is None:
+            continue
+        st.session_state[free_key("req", g.gid)] = col["required"] or col["dup"]
+        st.session_state[free_key("dup", g.gid)] = col["dup"]
 
 
 def free_groups():
@@ -1056,6 +1087,17 @@ def on_apply_proposals() -> None:
     reset_from("result")
 
 
+def pending_proposals(groups) -> list:
+    """아직 적용하지 않은 AI 묶기 추천 중 지금 묶음에 그대로 적용할 수 있는 것."""
+    ids = {g.gid for g in groups}
+    return [p for p in (st.session_state.get("ff_proposals") or []) if all(g in ids for g in p)]
+
+
+def on_apply_and_run() -> None:
+    on_apply_proposals()
+    st.session_state.ff_run_after_apply = True
+
+
 def render_free_ai(groups) -> None:
     ss = st.session_state
     api_key, model = ai_settings()
@@ -1128,8 +1170,10 @@ def render_free_groups(tables, groups) -> None:
     if pick_key in ss:
         ss[pick_key] = [g for g in ss[pick_key] if g in labels]
     c1, c2 = st.columns([4, 1], vertical_alignment="bottom")
-    c1.multiselect("같은 열로 묶을 열 고르기", list(labels), key=pick_key, format_func=lambda g: labels.get(g, g),
-                   placeholder="묶을 열을 두 개 이상 고르세요")
+    c1.multiselect("직접 묶기: 같은 열로 묶을 열을 두 개 이상 고르세요", list(labels), key=pick_key,
+                   format_func=lambda g: labels.get(g, g), placeholder="예: 접수일, 등록일",
+                   help="AI가 추천하지 않은 열도 직접 묶을 수 있습니다. 묶은 열은 '사용자 지정'으로 표시되고, "
+                        "아래 '묶음 풀기'로 되돌릴 수 있습니다.")
     c2.button("선택한 열 묶기", key="ff_merge_btn", on_click=on_merge_click, args=(pick_key,), width="stretch")
     merged = {g.gid: f"{g.label} ({g.origin}: {', '.join(g.names)})" for g in groups if g.origin != ff.AUTO}
     if merged:
@@ -1151,7 +1195,7 @@ def sync_free_order(groups) -> None:
         ss.ff_order = [g.gid for g in groups][:MAX_RESULT_COLUMNS]
         inherit = {}
     else:
-        ss.ff_order, inherit = ff.sync_order(ss.ff_order, groups, ss.ff_gid_norms, ss.ff_known)
+        ss.ff_order, inherit = ff.sync_order(ss.ff_order, groups, ss.ff_gid_norms, ss.ff_removed)
         ss.ff_order = ss.ff_order[:MAX_RESULT_COLUMNS]
     labels = {g.gid: g.label for g in groups}
     for new, (old, keep_name) in inherit.items():
@@ -1163,7 +1207,6 @@ def sync_free_order(groups) -> None:
             ss[free_key("name", new)] = ss[free_key("name", old)]
     for g in groups:
         ss.ff_gid_norms[g.gid] = g.norms
-        ss.ff_known.update(g.norms)
         if free_key("name", g.gid) not in ss:
             ss[free_key("name", g.gid)] = labels[g.gid]
         for kind in ("req", "dup"):
@@ -1178,6 +1221,13 @@ def free_key(kind: str, gid: str) -> str:
 def on_pick_change(pick_key: str) -> None:
     ss = st.session_state
     picked = list(ss[pick_key])
+    # 사용자가 직접 뺀 열만 기록한다. 다시 넣은 열은 기록에서 지운다 (그 밖의 이유로는 결과에서 빼지 않는다)
+    for gid in ss.ff_order:
+        if gid not in picked:
+            ss.ff_removed.update(ss.ff_gid_norms.get(gid, ()))
+    for gid in picked:
+        if gid not in ss.ff_order:
+            ss.ff_removed.difference_update(ss.ff_gid_norms.get(gid, ()))
     ss.ff_order = [g for g in ss.ff_order if g in picked] + [g for g in picked if g not in ss.ff_order]
     reset_from("result")
 
@@ -1227,6 +1277,10 @@ def render_free_columns(tables, groups):
                    max_selections=MAX_RESULT_COLUMNS)
     if len(groups) > MAX_RESULT_COLUMNS:
         st.caption(f"묶음이 {len(groups):,}개입니다. 결과에는 최대 {MAX_RESULT_COLUMNS}개 열까지 넣을 수 있습니다.")
+    left_out = [g.label for g in groups if g.gid not in ss.ff_order]
+    if left_out:   # 빠진 열이 있으면 눈에 띄게 (다시 넣으려면 위 칸에서 고르면 된다)
+        st.caption(md("결과에 넣지 않은 열: " + ", ".join(left_out[:30]))
+                   + (f" 외 {len(left_out) - 30}개" if len(left_out) > 30 else ""))
     if not ss.ff_order:
         st.info("결과에 넣을 열을 하나 이상 골라 주세요.")
         return [], set(), []
@@ -1352,7 +1406,22 @@ def render_free_steps(existing_keys) -> None:
     st.success(f"{src} {len(ss.ff_tables)}개를 읽었습니다.")
     with st.container(border=True, key="card_freeform"):
         sc = render_free_form(ss.ff_tables, existing_keys)
-        run_clicked = st.button("취합·검증 실행", key="run_btn", type="primary", disabled=sc is None)
+        # 적용하지 않은 AI 묶기 추천이 남아 있으면 실행 전에 알린다 (그냥 실행하는 것도 가능)
+        pending = pending_proposals(free_groups())
+        if pending:
+            st.warning(f"적용하지 않은 묶기 추천이 {len(pending)}건 있습니다. 적용하지 않으면 추천된 열이 따로따로 "
+                       "결과에 들어갑니다. '추천 적용하고 실행'을 누르면 체크한 추천을 묶은 뒤 바로 실행합니다.")
+        with st.container(horizontal=True, gap="small"):
+            if pending:
+                st.button("추천 적용하고 실행", key="ff_apply_run", type="primary", on_click=on_apply_and_run)
+            run_clicked = st.button("취합·검증 실행", key="run_btn", type="secondary" if pending else "primary",
+                                    disabled=sc is None)
+    if ss.pop("ff_run_after_apply", False):
+        # '추천 적용하고 실행': 콜백에서 추천을 묶었고, 이번 그리기에서 새 묶음으로 만든 설정(sc)으로 실행한다
+        run_clicked = True
+        if sc is None:
+            say("error", "추천을 적용했지만 위의 문제 때문에 실행하지 못했습니다. 문제를 고친 뒤 실행해 주세요.")
+            show_messages()
     if run_clicked and sc is not None:
         ss.plans = ff.make_plans(ss.ff_tables, sc)
         run_merge(sc)

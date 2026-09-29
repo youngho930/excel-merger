@@ -93,19 +93,24 @@ def test_sync_order_after_merge_split_and_new_columns(three):
     groups = group_headers(tables)
     g = by_label(groups)
     norms = {x.gid: x.norms for x in groups}
-    known = {n for x in groups for n in x.norms}
-    order = [g["고객명"].gid, g["연락처"].gid]                     # 성명은 뺀 상태
+
+    def removed_except(*labels):
+        """labels 말고는 모두 사용자가 뺀 상태."""
+        return {n for x in groups if x.label not in labels for n in x.norms}
+    order = [g["고객명"].gid, g["연락처"].gid]                     # 나머지는 사용자가 뺀 상태
     merged = regroup(tables, [({"고객명", "성명"}, USER)])
     new = by_label(merged)["고객명"].gid
-    out, inherit = sync_order(order, merged, norms, known)
+    out, inherit = sync_order(order, merged, norms, removed_except("고객명", "연락처"))
     assert out == [new, g["연락처"].gid] and inherit == {new: (g["고객명"].gid, True)}   # 자리·이름 물려받음
     # 풀면 조각들이 그 자리에 (이름은 조각 이름)
     norms[new] = by_label(merged)["고객명"].norms
-    out, inherit = sync_order([new], groups, norms, known)
+    out, inherit = sync_order([new], groups, norms, removed_except("고객명", "성명"))
     assert out == [g["고객명"].gid, g["성명"].gid] and inherit[g["성명"].gid] == (new, False)
-    # 처음 보는 이름의 묶음은 맨 뒤에 들어가고, 사용자가 뺀 묶음은 다시 넣지 않는다
-    out, _ = sync_order([g["고객명"].gid], groups, norms, known - {"담당기사"})
+    # 사용자가 직접 뺀 묶음만 빠지고, 나머지 묶음은 순서에 없더라도 맨 뒤에 다시 들어간다
+    out, _ = sync_order([g["고객명"].gid], groups, norms, removed_except("고객명", "담당기사"))
     assert out == [g["고객명"].gid, g["담당기사"].gid]
+    out, _ = sync_order([g["고객명"].gid], groups, norms, set())
+    assert set(out) == {x.gid for x in groups}
 
 
 def test_gid_is_stable_when_rereading(three):
