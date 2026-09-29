@@ -47,6 +47,12 @@ def _job_prepare(scenario, paths, header_rows=None, max_rows=None):
     return prepare(scenario, paths, header_rows, max_rows=max_rows)
 
 
+def _job_scan(paths, max_rows=None, header_rows=None):
+    """자유 양식: 시나리오 없이 파일을 읽는다 (머리글 자동 탐지)."""
+    from .free_form import scan_tables
+    return scan_tables(paths, max_rows=max_rows, header_rows=header_rows)
+
+
 def _job_execute(scenario, plans, out_dir, apply_suggestions=False):
     from .merge import execute
     from .writer import write_result
@@ -94,6 +100,7 @@ def _job_mem_info():
 
 JOBS = {
     "prepare": _job_prepare,
+    "scan": _job_scan,
     "execute": _job_execute,
     "write": _job_write,
     "sleep": _job_sleep,

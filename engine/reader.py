@@ -16,7 +16,7 @@ from typing import Any
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from .normalize import is_blank, normalize_header
+from .normalize import _number_from_text, is_blank, normalize_header, parse_date
 from .scenario import Scenario
 
 HEADER_SCAN_ROWS = 20           # 머리글을 찾을 때 위에서부터 훑는 행 수
@@ -57,6 +57,7 @@ class SourceTable:
     raw_headers: list[Any]              # 원래 머리글 값 (매칭에 사용)
     rows: list[SourceRow] = field(default_factory=list)
     header_confidence: str = "높음"     # "높음" | "낮음" | "지정"
+    top: list[tuple[Any, ...]] = field(default_factory=list)   # 위쪽 HEADER_SCAN_ROWS 행 (머리글 미리보기용)
 
     def column_label(self, index: int) -> str:
         """'C열 'Part No'' 같은 표시."""
@@ -97,6 +98,51 @@ def detect_header_row(rows: list[tuple[Any, ...]], scenario: Scenario) -> Header
         if n > most:
             fallback, most = i, n
     return HeaderGuess(fallback + 1, max(best_score, 0), False)
+
+
+# ---------------------------------------------------------------- 시나리오 없는 머리글 탐지 (자유 양식)
+MAX_LABEL_CHARS = 100   # 이보다 긴 글자는 머리글 이름으로 보지 않는다 (설명문·제목일 가능성)
+
+
+def label_key(value: Any) -> str | None:
+    """머리글 이름처럼 보이는 칸이면 정규화한 이름, 아니면 None.
+
+    글자 칸이어야 하고, 숫자나 날짜로 읽히면 안 된다 (데이터 행의 '2026.9.2', '1,200' 같은 값은 뺀다).
+    """
+    if not isinstance(value, str) or is_blank(value):
+        return None
+    s = value.strip()
+    if len(s) > MAX_LABEL_CHARS or _number_from_text(s) is not None or parse_date(s).ok:
+        return None
+    return normalize_header(s) or None
+
+
+def row_labels(row: tuple[Any, ...]) -> set[str]:
+    """한 행에서 머리글 이름처럼 보이는 서로 다른 이름들."""
+    return {k for k in (label_key(v) for v in row) if k}
+
+
+def detect_header_row_generic(rows: list[tuple[Any, ...]],
+                              peer_names: frozenset[str] | set[str] = frozenset()) -> HeaderGuess:
+    """시나리오 없이 머리글 행을 찾는다 (자유 양식).
+
+    1. 위쪽 행 중 '머리글 이름처럼 보이는 서로 다른 글자 칸'이 가장 많은 행
+    2. 그런 행이 여럿이면 다른 파일의 머리글 후보(peer_names)와 겹치는 이름이 가장 많은 행
+    3. 그래도 같으면 가장 위쪽 행
+    확신: 이름이 2개 이상이고, 1위가 하나뿐이거나 다른 파일과 이름이 2개 이상 겹칠 때.
+    """
+    labels = [row_labels(r) for r in rows[:HEADER_SCAN_ROWS]]
+    if not labels:
+        return HeaderGuess(1, 0, False)
+    best = max(len(x) for x in labels)
+    cands = [i for i, x in enumerate(labels) if len(x) == best]
+    overlap = {i: len(labels[i] & set(peer_names)) for i in cands}
+    top = max(overlap.values())
+    chosen = next(i for i in cands if overlap[i] == top)   # 겹침이 같으면 위쪽 행
+    confident = best >= 2 and (len(cands) == 1 or top >= 2)
+    if best == 0:
+        return HeaderGuess(1, 0, False)
+    return HeaderGuess(chosen + 1, best, confident)
 
 
 def _check_zip(path: Path) -> None:
@@ -255,14 +301,33 @@ def _read_data(ws, header_row: int, width: int, path: Path, max_rows: int = MAX_
     return out
 
 
-def read_table(path: str | Path, scenario: Scenario, header_row: int | None = None,
-               sheet: str | None = None, max_rows: int | None = None) -> SourceTable:
+def scan_tops(path: str | Path) -> list[tuple[str, list[tuple[Any, ...]]]]:
+    """시트마다 위쪽 HEADER_SCAN_ROWS 행만 읽는다 (자유 양식에서 여러 파일의 머리글 후보를 먼저 모을 때)."""
+    path = Path(path)
+    wb = _open_workbook(path)
+    try:
+        if len(wb.sheetnames) > MAX_SHEETS:
+            raise ReadError(f"'{path.name}'에 시트가 너무 많습니다 (최대 {MAX_SHEETS}개).")
+        return [(name, _scan_top(wb[name])) for name in wb.sheetnames]
+    except (ReadError, MemoryError):
+        raise
+    except Exception:
+        raise ReadError(f"'{path.name}'의 시트 내용을 읽을 수 없습니다. 파일이 손상되었을 수 있습니다.") from None
+    finally:
+        wb.close()
+
+
+def read_table(path: str | Path, scenario: Scenario | None, header_row: int | None = None,
+               sheet: str | None = None, max_rows: int | None = None,
+               peer_names: frozenset[str] = frozenset()) -> SourceTable:
     """엑셀 파일 하나를 읽는다.
 
     max_rows: 데이터 최대 행 수 (배포 환경별 제한). MAX_ROWS보다 크게 할 수는 없다.
     header_row를 주면 그 행을 머리글로 쓰고, 없으면 자동으로 찾는다.
     sheet를 주지 않으면 머리글 점수가 가장 높은 시트를 쓴다(동점이면 앞 시트).
     머리글 탐지는 시트마다 위쪽 몇 행만 읽고, 고른 시트 하나만 끝까지 읽는다.
+    scenario가 None이면(자유 양식) 시나리오 어휘 없이 detect_header_row_generic 으로 찾는다.
+    peer_names 는 그때 쓰는 다른 파일의 머리글 후보 이름(정규화)이다.
     """
     path = Path(path)
     wb = _open_workbook(path)
@@ -275,7 +340,8 @@ def read_table(path: str | Path, scenario: Scenario, header_row: int | None = No
             if name not in wb.sheetnames:
                 raise ReadError(f"'{path.name}'에 '{name}' 시트가 없습니다.")
             top = _scan_top(wb[name])
-            guess = detect_header_row(top, scenario)
+            guess = detect_header_row(top, scenario) if scenario is not None \
+                else detect_header_row_generic(top, peer_names)
             if best is None or (guess.confident, guess.score) > (best[0].confident, best[0].score):
                 best = (guess, name, top)
         guess, sheet_name, top = best
@@ -308,4 +374,5 @@ def read_table(path: str | Path, scenario: Scenario, header_row: int | None = No
     ]
     return SourceTable(file_name=path.name, path=path, sheet_name=sheet_name, header_row=hr,
                        headers=headers, raw_headers=raw_headers, rows=rows,
-                       header_confidence=confidence)
+                       header_confidence=confidence,
+                       top=list(top) if scenario is None else [])
