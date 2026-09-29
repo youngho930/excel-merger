@@ -174,9 +174,7 @@ def test_rendered_html_contains_no_user_or_scenario_text():
     at.button(key="sample_btn").click().run()
     at.button(key="run_btn").click().run()
     assert not at.exception, at.exception
-    m = app.load_measurement()
-    hero = app.hero_html(app.load_test_count(), m["manual_minutes"], m["tool_minutes"], m["errors_total"],
-                         m["manual_found"], m["tool_found"])
+    hero = app.hero_html(app.load_test_count(), *app.hero_measure_args(app.load_measurement()))
     allowed = {app.APP_CSS, hero, app.flow_html(len(KINDS))}
     bodies = [e.proto.body for e in at.get("html")]
     assert len(bodies) >= 3

@@ -146,6 +146,7 @@ APP_CSS = """<style>
   color: var(--xm-accent); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
 .xm-stats span { font-size: 0.8rem; line-height: 1.35; color: var(--xm-muted); }
 .xm-stats-col { min-width: 0; }
+.xm-stats i { font-style: normal; }
 .xm-stats-note { margin: 0.4rem 0.25rem 0; font-size: 0.7rem; line-height: 1.4; color: var(--xm-muted); }
 /* .xm-wrap ul 초기화 규칙(padding-left: 0 !important)이 패널 안쪽 왼쪽 여백까지 지우지 않도록 되돌린다 */
 .xm-wrap .xm-stats { padding-left: 1.25rem !important; }
@@ -163,6 +164,7 @@ APP_CSS = """<style>
   .xm-stats span { font-size: 0.7rem; line-height: 1.3; color: #C9D4CE; word-break: keep-all; overflow: hidden;
     display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
   .xm-stats-note { margin-top: 0.2rem; }
+  .xm-hide-sm { display: none; }
 }
 
 /* 작동 흐름 띠 */
@@ -234,7 +236,10 @@ HERO_TEMPLATE = """<div class="xm-wrap"><section class="xm-hero" aria-label="소
 {note}</div>
 </section></div>"""
 # 직접 측정 결과 카드 (값은 project_stats.toml [measurement], 조건은 docs/measurement.md)
-HERO_TIME_CARD = "<li><b>{manual}분 → {tool}분</b><span>3개 파일 취합·검증 시간 (직접 측정)</span></li>\n"
+# 분과 초 사이는 줄바꿈 없는 공백(&nbsp;): 좁은 화면에서 "1분 / 27초"처럼 한 값이 두 줄로 나뉘지 않게.
+# "(직접 측정)"은 모바일에서 숨긴다(칸이 좁아 세 줄이 되므로). 바로 아래 안내 줄에 "직접 측정"이 있다.
+HERO_TIME_CARD = ("<li><b>{ratio}배</b><span>{manual_min}분&nbsp;{manual_sec}초 → {tool_min}분&nbsp;{tool_sec}초"
+                  '<i class="xm-hide-sm"> (직접 측정)</i></span></li>\n')
 HERO_FOUND_CARD = "<li><b>{found} / {total}</b><span>오류 검출 (수작업 {manual}건)</span></li>\n"
 HERO_TESTS_CARD = "<li><b>{tests}개</b><span>자동 테스트</span></li>\n"
 HERO_NOTE = '<p class="xm-stats-note">샘플 3개 파일 기준 직접 측정 · 자세한 조건은 GitHub</p>'
@@ -264,12 +269,18 @@ def _whole_number(value: Any) -> int:
     return value
 
 
-def hero_html(tests: int | None, manual_minutes: int | None, tool_minutes: int | None,
+def hero_html(tests: int | None, ratio: int | None, manual_min: int | None, manual_sec: int | None,
+              tool_min: int | None, tool_sec: int | None,
               errors_total: int | None, manual_found: int | None, tool_found: int | None) -> str:
-    """맨 위 히어로. 측정값이 하나라도 없으면 측정 카드 두 개와 안내 줄을 빼고, tests 가 없으면 그 카드를 뺀다."""
-    measured = None not in (manual_minutes, tool_minutes, errors_total, manual_found, tool_found)
-    time_card = HERO_TIME_CARD.format(manual=_whole_number(manual_minutes),
-                                      tool=_whole_number(tool_minutes)) if measured else ""
+    """맨 위 히어로. 측정값이 하나라도 없으면 측정 카드 두 개와 안내 줄을 빼고, tests 가 없으면 그 카드를 뺀다.
+
+    시간 카드: 큰 숫자는 배율(수작업 초 ÷ 도구 초, 소수점 버림), 설명은 실제 측정값(분·초). 값은 load_measurement() 가 계산한다.
+    """
+    measured = None not in (ratio, manual_min, manual_sec, tool_min, tool_sec, errors_total, manual_found, tool_found)
+    time_card = HERO_TIME_CARD.format(ratio=_whole_number(ratio),
+                                      manual_min=_whole_number(manual_min), manual_sec=_whole_number(manual_sec),
+                                      tool_min=_whole_number(tool_min), tool_sec=_whole_number(tool_sec)) \
+        if measured else ""
     found_card = HERO_FOUND_CARD.format(found=_whole_number(tool_found), total=_whole_number(errors_total),
                                         manual=_whole_number(manual_found)) if measured else ""
     note = HERO_NOTE if measured else ""
@@ -298,7 +309,10 @@ MEASUREMENT_KEYS = ("manual_seconds", "tool_seconds", "errors_total", "manual_fo
 
 
 def load_measurement() -> dict[str, int] | None:
-    """project_stats.toml [measurement] 의 직접 측정값 + 화면용 분(초는 버림). 없거나 이상하면 None (카드를 숨긴다)."""
+    """project_stats.toml [measurement] 의 직접 측정값 + 화면용 계산값. 없거나 이상하면 None (카드를 숨긴다).
+
+    ratio: 수작업 초 ÷ 도구 초 (소수점 버림). manual_min/manual_sec, tool_min/tool_sec: 초를 분·초로 나눈 값.
+    """
     try:
         raw = tomllib.loads(PROJECT_STATS.read_text(encoding="utf-8"))["measurement"]
         values = {k: raw[k] for k in MEASUREMENT_KEYS}
@@ -306,9 +320,19 @@ def load_measurement() -> dict[str, int] | None:
         return None
     if not all(type(v) is int and v >= 0 for v in values.values()):
         return None
-    values["manual_minutes"] = values["manual_seconds"] // 60
-    values["tool_minutes"] = values["tool_seconds"] // 60
+    if values["tool_seconds"] == 0:
+        return None
+    values["ratio"] = values["manual_seconds"] // values["tool_seconds"]
+    values["manual_min"], values["manual_sec"] = divmod(values["manual_seconds"], 60)
+    values["tool_min"], values["tool_sec"] = divmod(values["tool_seconds"], 60)
     return values
+
+
+def hero_measure_args(m: dict[str, int] | None) -> tuple:
+    """hero_html 에 넘길 측정값 (tests 다음 인자들). 측정값이 없으면 모두 None."""
+    m = m or {}
+    return tuple(m.get(k) for k in ("ratio", "manual_min", "manual_sec", "tool_min", "tool_sec",
+                                    "errors_total", "manual_found", "tool_found"))
 
 
 def render_footer() -> None:
@@ -1030,9 +1054,7 @@ def main() -> None:
         st.title("엑셀 자동 취합·검증기")
     # 첫 화면(1280×800, 사이드바 접힘)에서 헤드라인·숫자 패널·작동 흐름·체험 버튼이 스크롤 없이 보이도록
     # 히어로 여백을 줄이고, 좁은 화면에서는 흐름 띠를 작은 알약 모양으로 줄인다
-    m = load_measurement() or {}
-    st.html(hero_html(load_test_count(), m.get("manual_minutes"), m.get("tool_minutes"),
-                      m.get("errors_total"), m.get("manual_found"), m.get("tool_found")))
+    st.html(hero_html(load_test_count(), *hero_measure_args(load_measurement())))
     st.html(flow_html(len(KINDS)))
 
     # ---- 1. 시나리오
