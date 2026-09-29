@@ -27,7 +27,7 @@ from engine import limits as limits_mod
 from engine.jobs import JobError, TimeLimitError, run_job, set_max_concurrent
 from engine.matching import AI, USER
 from engine.normalize import display
-from engine.reader import EXCEL_SUFFIXES
+from engine.reader import EXCEL_SUFFIXES, read_table
 from engine.writer import ACTION_COL, ERROR_COLS
 
 ROOT = Path(__file__).resolve().parent
@@ -66,6 +66,75 @@ DEMO_MANIFEST = "demo.yaml"           # samples/<폴더>/demo.yaml 이 있으면
 MAX_KEPT_OUTPUTS = 2                  # 세션마다 남겨 두는 결과 파일 수 (나머지는 지운다)
 
 NO_SOURCE = "(선택 안 함)"
+REPO_URL = "https://github.com/youngho930/excel-merger"
+PREVIEW_ROWS = 3                      # 샘플 미리보기에 보여줄 데이터 행 수
+
+# ---- 용어 도움말 (물음표 아이콘). 한곳에 모아 두고 필요한 자리에서 짧게 보여준다
+GLOSSARY = {
+    "기준열": "결과 엑셀에 들어갈 표준 열입니다. 파일마다 열 이름이 달라도 이 열로 맞춰 모읍니다.",
+    "허용값": "그 칸에 들어갈 수 있는 값의 목록입니다. 목록에 없는 값은 오류로 표시합니다. 예: 판정 = 합격/불합격",
+    "중복기준": "같은 행인지 판단하는 열입니다. 이 열들의 값이 모두 같으면 중복 행으로 봅니다. "
+               "날짜는 표기가 달라도 같은 날이면 같다고 봅니다.",
+    "수정 제안값": "고칠 값이 분명할 때 보여주는 추천 값입니다. 예: '합격 '(뒤에 공백) → '합격'. "
+                 "자동으로 바꾸지 않고, '수정 제안값 일괄 적용'을 켰을 때만 반영합니다.",
+    "중복 그룹": "서로 중복인 행끼리 묶은 번호입니다(중복-1, 중복-2…). 같은 번호끼리 비교해서 남길 행을 고르면 됩니다.",
+    "처리됨": "자동 수정됨, 행 제외됨, 중복 해소로 처리한 오류입니다.",
+    "남은 오류": "직접 확인해야 할 오류입니다. 전체 오류에서 처리됨을 뺀 수입니다.",
+    "전체 오류": "파일에서 찾은 모든 오류입니다. 처리해도 이 수는 줄지 않습니다.",
+    "처리": "그 오류를 어떻게 처리했는지 적는 칸입니다. 자동 수정됨 / 행 제외됨 / 중복 해소. 빈칸이면 아직 남은 오류입니다.",
+}
+
+
+def step(title: str, summary: str, help: str | None = None) -> None:
+    """단계 제목 + 한 줄 설명. 자세한 내용은 details()로 접어 둔다."""
+    st.subheader(title, help=help)
+    st.caption(summary)
+
+
+def scenario_help(by_key) -> str:
+    """시나리오 선택 칸의 물음표 도움말: 시나리오마다 한 줄 설명."""
+    return "\n\n".join(f"**{s.name}**: {s.description}" if s.description else f"**{s.name}**"
+                       for s in by_key.values())
+
+
+def details(text: str) -> None:
+    with st.expander("자세히 보기"):
+        st.markdown(text)
+
+
+def render_sidebar() -> None:
+    with st.sidebar:
+        st.subheader("이 도구에 대해")
+        st.markdown("부서·협력사·지점마다 양식이 다른 엑셀을 모으는 일은 손이 많이 가고 실수가 잦습니다.\n\n"
+                    "이 도구는 파일을 한 번에 모으고, 빈칸·형식·중복 같은 오류를 자동으로 찾아 표시합니다.")
+        st.markdown("**설계 원칙**\n"
+                    "1. 시나리오는 설정 파일로 — 새 양식은 설정 파일만 추가하면 됩니다.\n"
+                    "2. 규칙으로 먼저, 남은 열만 AI — 이름·동의어로 못 찾은 열만 AI에게 물어봅니다.\n"
+                    "3. 원본은 그대로, 외부로는 열 이름만 — 올린 파일은 바꾸지 않고, AI에는 기본으로 열 이름만 보냅니다.")
+        st.markdown(f"[GitHub 저장소]({REPO_URL})")
+        st.caption("만든 사람: 신영호")
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def sample_preview(path: str, mtime: float, scenario_key: str, _scenario) -> tuple[int, list[str], list[list[str]]]:
+    """(머리글 행, 원래 열 이름, 앞쪽 데이터 몇 행). 저장소의 샘플 파일만 읽는다 (mtime·시나리오가 바뀌면 다시 읽음)."""
+    table = read_table(path, _scenario)
+    rows = [[cell_text(v) for v in r.cells] for r in table.rows[:PREVIEW_ROWS]]
+    return table.header_row, list(table.headers), rows
+
+
+def render_sample_preview(scenario, samples: list[Path]) -> None:
+    with st.expander("샘플 파일 미리보기"):
+        st.caption("파일마다 열 이름·열 순서·날짜 표기가 다릅니다. 이 도구가 그 차이를 맞춰서 모읍니다.")
+        for p in samples:
+            try:
+                hr, headers, rows = sample_preview(str(p), p.stat().st_mtime, scenario.key, scenario)
+            except (ReadError, OSError):
+                st.caption(f"{md(p.name)}: 미리보기를 만들지 못했습니다.")
+                continue
+            note = f" · 위쪽 제목 줄 때문에 머리글이 {hr}행에 있습니다" if hr > 1 else ""
+            st.markdown(f"**{md(p.name)}**{note}")
+            st.dataframe(pd.DataFrame(rows, columns=headers), hide_index=True, width="stretch")
 
 
 # ================================================================== 상태·작업 폴더
@@ -432,9 +501,15 @@ def render_ai(scenario) -> None:
 
 def render_matching(scenario) -> None:
     plans = st.session_state.plans
-    st.subheader("3. 열 매칭 확인")
-    st.caption("파일마다 원본 열이 어느 기준열로 들어가는지 확인하세요. 틀렸다면 드롭다운에서 고칠 수 있습니다. "
-               "매칭 방법: 정확히 일치 / 동의어 / AI 추천 / 사용자 지정 / 매칭 안 됨")
+    step("3. 열 매칭 확인", "원본 열이 어느 기준열로 들어가는지 확인하고, 틀리면 드롭다운에서 고칩니다.",
+         help=GLOSSARY["기준열"])
+    details("**매칭 방법**\n"
+            "- **정확히 일치**: 열 이름이 기준열과 같습니다. 띄어쓰기·대소문자·기호 차이는 무시합니다.\n"
+            "- **동의어**: 시나리오 설정의 '다른 이름' 목록에 있는 이름입니다. 예: 품번 → 품목코드\n"
+            "- **AI 추천**: 동의어로도 못 찾은 열을 AI가 추천했습니다. 맞는지 꼭 확인해 주세요.\n"
+            "- **사용자 지정**: 드롭다운에서 직접 고른 열입니다.\n"
+            "- **매칭 안 됨**: 짝을 찾지 못했습니다. 필수 열이면 실행 전에 경고가 나옵니다.\n\n"
+            "AI에게는 기본으로 **열 이름만** 보냅니다. 파일의 실제 값은 '예시값 함께 보내기'를 켰을 때만 보냅니다.")
     if st.session_state.map_error:
         st.error(md(st.session_state.map_error))
     render_ai(scenario)
@@ -519,9 +594,12 @@ def render_duplicates(result, res) -> None:
     groups = result.dup_groups()
     if not groups:
         return
-    st.subheader("5. 중복 행 고르기")
-    st.caption("중복 그룹마다 결과에 남길 행을 고르세요. 체크를 끈 행은 취합결과에서 빠지고 "
-               "'제외된 행' 시트에 원래 값으로 기록됩니다. 기본은 전부 남김입니다.")
+    step("5. 중복 행 고르기", "중복 그룹마다 결과에 남길 행을 고릅니다. 기본은 전부 남김입니다.",
+         help=GLOSSARY["중복 그룹"])
+    details("- 체크를 끈 행은 취합결과에서 빠지고, **'제외된 행' 시트**에 원래 값 그대로 기록됩니다.\n"
+            "- 그룹에 한 행만 남으면 그 행의 중복 오류는 **'중복 해소'**로 처리됩니다.\n"
+            "- 한 그룹의 행을 모두 빼도 됩니다. 이때는 경고가 나옵니다.\n"
+            "- 뺀 행의 다른 오류도 오류목록에 남고, '처리' 칸에 '행 제외됨'으로 표시됩니다.")
     names = result.scenario.column_names
     items = list(groups.items())
     if len(items) > MAX_DUP_GROUPS_SHOWN:
@@ -613,28 +691,39 @@ def prune_outputs() -> None:
 def render_result() -> None:
     result = st.session_state.result
     res = current_resolution()
-    st.subheader("4. 실행 결과")
+    step("4. 실행 결과", "찾은 오류를 종류별로 셉니다. 직접 확인할 건수는 '남은 오류'입니다.")
     fixes = result.suggestion_map()
     total, done, remaining = res.totals()
 
     top = st.columns(4)
     with top[0].container(border=True):
-        st.metric("남은 오류", f"{remaining:,}건",
-                  help="직접 확인해야 할 오류입니다. 전체 오류에서 처리됨(자동 수정·행 제외·중복 해소)을 뺀 수입니다.")
-    top[1].metric("전체 오류", f"{total:,}건")
-    top[2].metric("처리됨", f"{done:,}건")
-    top[3].metric("제외한 행", f"{len(res.excluded):,}개")
+        st.metric("남은 오류", f"{remaining:,}건", help=GLOSSARY["남은 오류"])
+    top[1].metric("전체 오류", f"{total:,}건", help=GLOSSARY["전체 오류"])
+    top[2].metric("처리됨", f"{done:,}건", help=GLOSSARY["처리됨"])
+    top[3].metric("제외한 행", f"{len(res.excluded):,}개", help="중복 행 고르기에서 결과에서 뺀 행의 수입니다.")
     info = st.columns(4)
     info[0].metric("파일 수", f"{len(result.plans)}개")
     info[1].metric("취합 행 수", f"{len(result.rows) - len(res.excluded):,}행")
-    info[2].metric("수정 제안 있음", f"{len(fixes):,}건")
+    info[2].metric("수정 제안 있음", f"{len(fixes):,}건", help=GLOSSARY["수정 제안값"])
+    details("**오류 종류**\n"
+            "- **필수값 빈칸**: 꼭 있어야 하는 칸이 비어 있습니다.\n"
+            "- **형식 오류**: 숫자 칸에 글자가 있거나(예: '12개'), 없는 날짜입니다(예: 13월).\n"
+            "- **범위 밖 값**: 정해진 범위를 벗어났습니다(예: 음수 수량).\n"
+            "- **허용값 아닌 값**: 정해진 값 목록에 없습니다(예: 'OK', '합격 ').\n"
+            "- **중복 행**: 중복기준 열의 값이 같은 행이 둘 이상 있습니다. 다른 파일끼리도 찾습니다.")
     st.dataframe(pd.DataFrame([{"오류 종류": k, "전체": t, "처리됨": d, "남은 오류": r}
                                for k, (t, d, r) in res.counts().items()]),
                  hide_index=True, key="kind_table")
 
     render_duplicates(result, res)
 
-    st.subheader("6. 결과 엑셀 받기")
+    step("6. 결과 엑셀 받기", "오류를 색칠한 결과 엑셀을 내려받습니다. 올린 파일은 바뀌지 않습니다.")
+    details("**결과 엑셀의 시트**\n"
+            "- **취합결과**: 모은 데이터. 출처 파일과 원래 행 번호가 붙고, 오류 칸은 종류별 색으로 칠합니다.\n"
+            "- **오류목록**: 오류 하나당 한 줄. 파일, 행, 열, 오류 종류, 값, 설명, 수정 제안값, 중복 그룹, 처리.\n"
+            "- **제외된 행**: 중복 행 고르기에서 뺀 행 (뺀 행이 있을 때만).\n"
+            "- **요약**: 오류 종류별 전체 / 처리됨 / 남은 오류.\n"
+            "- **범례**: 색의 뜻.")
     if "apply_suggestions" not in st.session_state:
         st.session_state.apply_suggestions = st.session_state.apply_pref
     applied = st.checkbox(
@@ -666,7 +755,9 @@ def render_result() -> None:
     if only_remaining:
         shown = shown[shown[ACTION_COL] == ""]
     st.caption(f"{len(shown):,}건 표시 (전체 {len(df):,}건 중 남은 오류 {remaining:,}건)")
-    st.dataframe(shown, hide_index=True, width="stretch")
+    st.dataframe(shown, hide_index=True, width="stretch", column_config={
+        name: st.column_config.Column(help=GLOSSARY[name])
+        for name in ("수정 제안값", "중복 그룹", ACTION_COL) if name in shown.columns and name in GLOSSARY})
 
 
 # ================================================================== 화면
@@ -675,9 +766,11 @@ def main() -> None:
     init_state()
     ss = st.session_state
 
+    render_sidebar()
     st.title("엑셀 자동 취합·검증기")
-    st.write("부서·협력사·지점마다 양식이 다른 엑셀 파일을 하나로 모으고, 빈칸·형식·범위·허용값·중복 오류를 찾아 표시합니다. "
-             "올린 파일은 바꾸지 않고, 결과는 새 엑셀 파일로 만듭니다.")
+    # 첫 화면에서 "샘플 파일로 바로 체험" 버튼이 스크롤 없이 보이도록, 안내는 두 줄만 둔다
+    st.markdown("양식이 제각각인 엑셀 파일을 하나로 모으고, 오류를 자동으로 찾아 표시합니다.\n\n"
+                "**30초 체험:** ① 샘플 파일로 바로 체험 → ② 열 매칭 확인 → ③ 취합·검증 실행 → ④ 결과 엑셀 받기")
 
     # ---- 1. 시나리오
     try:
@@ -690,21 +783,11 @@ def main() -> None:
         st.stop()
     by_key = {s.key: s for s in scenarios}
 
-    st.subheader("1. 시나리오 선택")
+    step("1. 시나리오 선택", "어떤 종류의 엑셀을 모을지 고르고, 샘플로 바로 체험해 보세요.")
     key = st.selectbox("어떤 엑셀을 취합하나요?", list(by_key), key="scenario",
-                       format_func=lambda k: by_key[k].name, on_change=on_scenario_change)
+                       format_func=lambda k: by_key[k].name, on_change=on_scenario_change,
+                       help=scenario_help(by_key))
     scenario = by_key[key]
-    if scenario.description:
-        st.caption(scenario.description)
-    with st.expander("이 시나리오의 기준열 보기"):
-        st.dataframe(pd.DataFrame([{
-            "기준열": c.name, "필수": "예" if c.required else "", "형식": c.fmt,
-            "범위": "" if c.range is None else f"{display(c.range[0])} ~ {display(c.range[1])}",
-            "허용값": "" if c.allowed is None else ", ".join(display(a) for a in c.allowed),
-            "다른 이름(동의어)": ", ".join(c.aliases)} for c in scenario.columns]),
-            hide_index=True, width="stretch")
-        if scenario.dup_keys:
-            st.caption("중복 판단 기준: " + " + ".join(scenario.dup_keys))
 
     samples = sample_files(scenario)
     demos = ai_demos(set(by_key))
@@ -729,11 +812,31 @@ def main() -> None:
         if demo is not None and demo["scenario"] == key:
             load_files(scenario, [(p.name, p) for p in demo["files"]], "demo")
 
+    # 버튼 아래에 접어 둔다 (첫 화면에서 버튼이 위에 보이도록)
+    if samples:
+        render_sample_preview(scenario, samples)
+    with st.expander("이 시나리오의 기준열 보기"):
+        if scenario.description:
+            st.caption(scenario.description)
+        st.dataframe(pd.DataFrame([{
+            "기준열": c.name, "필수": "예" if c.required else "", "형식": c.fmt,
+            "범위": "" if c.range is None else f"{display(c.range[0])} ~ {display(c.range[1])}",
+            "허용값": "" if c.allowed is None else ", ".join(display(a) for a in c.allowed),
+            "다른 이름(동의어)": ", ".join(c.aliases)} for c in scenario.columns]),
+            hide_index=True, width="stretch",
+            column_config={"기준열": st.column_config.TextColumn(help=GLOSSARY["기준열"]),
+                           "허용값": st.column_config.TextColumn(help=GLOSSARY["허용값"]),
+                           "다른 이름(동의어)": st.column_config.TextColumn(
+                               help="파일에 이 이름으로 적혀 있어도 같은 기준열로 알아봅니다.")})
+        if scenario.dup_keys:
+            st.markdown("중복기준: " + md(" + ".join(scenario.dup_keys)), help=GLOSSARY["중복기준"])
+    details("- **시나리오**는 '어떤 엑셀을 모을지'에 대한 설정입니다. 결과 엑셀의 열(기준열), 필수 여부, "
+            "형식, 허용값, 중복기준이 들어 있습니다.\n"
+            "- **샘플 파일로 바로 체험**: 이 시나리오의 샘플 엑셀을 올린 것처럼 불러옵니다. 샘플에는 일부러 오류를 넣어 두었습니다.\n"
+            "- **AI 매칭 체험**: 열 이름이 동의어 사전에 없는 파일입니다. AI 추천으로 열을 맞추는 과정을 볼 수 있습니다.")
+
     # ---- 2. 업로드
-    st.subheader("2. 엑셀 파일 올리기")
-    st.caption(f"제한: 한 번에 최대 {MAX_FILES}개 · 파일당 {MAX_FILE_BYTES // MB}MB · "
-               f"합계 {MAX_TOTAL_UPLOAD_BYTES // MB}MB · 파일당 {MAX_ROWS:,}행 · "
-               f"모든 파일 합계 {MAX_TOTAL_ROWS:,}행 · 단계마다 처리 시간 {TIME_LIMIT}초")
+    step("2. 엑셀 파일 올리기", "모을 엑셀 파일(.xlsx)을 한 번에 여러 개 올립니다.")
     for note in LIMIT_NOTES:   # 관리자 설정(secrets·환경변수)이 잘못된 경우
         st.caption(f"설정 안내: {md(note)}")
     uploads = st.file_uploader("취합할 엑셀 파일(.xlsx)을 모두 골라 올려 주세요.", type=["xlsx", "xlsm"],
@@ -750,6 +853,14 @@ def main() -> None:
                 load_files(scenario, [(u.name, u.getvalue()) for u in uploads], "upload")
         elif ss.load_source == "upload":
             reset_from("files")
+    with st.expander("자세히 보기"):
+        st.caption(f"제한: 한 번에 최대 {MAX_FILES}개 · 파일당 {MAX_FILE_BYTES // MB}MB · "
+                   f"합계 {MAX_TOTAL_UPLOAD_BYTES // MB}MB · 파일당 {MAX_ROWS:,}행 · "
+                   f"모든 파일 합계 {MAX_TOTAL_ROWS:,}행 · 단계마다 처리 시간 {TIME_LIMIT}초")
+        st.markdown("- 열 이름·열 순서·날짜 표기가 파일마다 달라도 괜찮습니다.\n"
+                    "- 위쪽에 제목 줄이 있어도 머리글 행을 자동으로 찾습니다.\n"
+                    "- 올린 파일은 바꾸지 않습니다. 결과는 새 엑셀 파일로 만듭니다.\n"
+                    "- .xls 파일은 엑셀에서 .xlsx로 다시 저장해서 올려 주세요.")
     show_messages()
 
     if not ss.plans:
