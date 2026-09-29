@@ -126,20 +126,24 @@ def detect_header_row_generic(rows: list[tuple[Any, ...]],
                               peer_names: frozenset[str] | set[str] = frozenset()) -> HeaderGuess:
     """시나리오 없이 머리글 행을 찾는다 (자유 양식).
 
-    1. 위쪽 행 중 '머리글 이름처럼 보이는 서로 다른 글자 칸'이 가장 많은 행
+    1. 위쪽 행 중 '머리글 이름처럼 보이는 글자 칸'(숫자·날짜가 아닌 글자)이 가장 많은 행
     2. 그런 행이 여럿이면 다른 파일의 머리글 후보(peer_names)와 겹치는 이름이 가장 많은 행
     3. 그래도 같으면 가장 위쪽 행
     확신: 이름이 2개 이상이고, 1위가 하나뿐이거나 다른 파일과 이름이 2개 이상 겹칠 때.
     """
-    labels = [row_labels(r) for r in rows[:HEADER_SCAN_ROWS]]
+    scan = rows[:HEADER_SCAN_ROWS]
+    labels = [row_labels(r) for r in scan]
     if not labels:
         return HeaderGuess(1, 0, False)
-    best = max(len(x) for x in labels)
-    cands = [i for i, x in enumerate(labels) if len(x) == best]
+    # 점수는 머리글 이름처럼 보이는 칸의 수 (서로 다른 이름 수가 아님). 머리글에 '비고'·'비 고'처럼
+    # 정규화하면 같은 이름이 있어도 데이터 행에 밀리지 않게 한다 (보안 검토 F-2)
+    counts = [sum(1 for v in r if label_key(v)) for r in scan]
+    best = max(counts)
+    cands = [i for i, n in enumerate(counts) if n == best]
     overlap = {i: len(labels[i] & set(peer_names)) for i in cands}
-    top = max(overlap.values())
-    chosen = next(i for i in cands if overlap[i] == top)   # 겹침이 같으면 위쪽 행
-    confident = best >= 2 and (len(cands) == 1 or top >= 2)
+    most = max(overlap.values())
+    chosen = next(i for i in cands if overlap[i] == most)   # 겹침이 같으면 위쪽 행
+    confident = best >= 2 and (len(cands) == 1 or most >= 2)
     if best == 0:
         return HeaderGuess(1, 0, False)
     return HeaderGuess(chosen + 1, best, confident)

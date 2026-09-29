@@ -305,8 +305,14 @@ INSTRUCTIONS = """당신은 엑셀 열 이름을 표준 열 이름에 짝짓는 
 """
 
 
+def _prompt_json(request: dict[str, Any]) -> str:
+    """프롬프트에 넣을 JSON. '<' '>'를 \\u003c \\u003e로 바꿔 열 이름으로 </data> 경계를 닫지 못하게 한다
+    (JSON 으로는 같은 값이다, 자유 양식 보안 검토 F-4)."""
+    return json.dumps(request, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
+
+
 def build_prompt(request: dict[str, Any]) -> str:
-    return INSTRUCTIONS + "\n<data>\n" + json.dumps(request, ensure_ascii=False) + "\n</data>\n"
+    return INSTRUCTIONS + "\n<data>\n" + _prompt_json(request) + "\n</data>\n"
 
 
 # ------------------------------------------------------------------ 호출
@@ -524,6 +530,20 @@ class GroupOutcome:
         return ", ".join(f"{reason} {n}건" for reason, n in self.dropped.items())
 
 
+_EMAIL_LIKE = re.compile(r"\S+@\S+")
+_RRN_LIKE = re.compile(r"\d{6}\s*-\s*\d{7}")
+MIN_DIGITS_AS_DATA = 7   # 숫자가 이만큼 있으면 전화번호·계좌번호 같은 데이터 값으로 본다
+
+
+def looks_like_data(name: str) -> bool:
+    """머리글 이름이 아니라 데이터 값처럼 보이는 글자 (머리글을 잘못 찾았을 때 개인정보가 AI로 가지 않게,
+    자유 양식 보안 검토 F-2): 숫자·날짜로 읽히는 값, 이메일·주민번호 모양, 숫자가 7개 이상인 값."""
+    from .reader import label_key
+    s = str(name)
+    return (label_key(s) is None or bool(_EMAIL_LIKE.search(s)) or bool(_RRN_LIKE.search(s))
+            or sum(ch.isdigit() for ch in s) >= MIN_DIGITS_AS_DATA)
+
+
 def _rejected_between(a, b, rejected) -> bool:
     return any(frozenset((x, y)) in rejected for x in a.norms for y in b.norms)
 
@@ -537,11 +557,14 @@ def build_group_request(groups, rejected=frozenset()) -> tuple[dict[str, Any], d
         if not any(h is not g and not (g.files & h.files) and not _rejected_between(g, h, rejected)
                    for h in groups):
             continue
+        names = [n for n in g.names if not looks_like_data(n)][:MAX_NAMES_PER_GROUP]
+        if not names:
+            continue
         if len(columns) >= MAX_AI_GROUPS:
             break
         cid = f"C{len(columns) + 1}"
         ids[cid] = g.gid
-        columns.append({"id": cid, "names": [_short(n, MAX_NAME_CHARS) for n in g.names[:MAX_NAMES_PER_GROUP]]})
+        columns.append({"id": cid, "names": [_short(n, MAX_NAME_CHARS) for n in names]})
     return {"columns": columns}, ids
 
 
@@ -551,7 +574,7 @@ def group_request_is_trimmed(groups, rejected=frozenset()) -> bool:
 
 
 def build_group_prompt(request: dict[str, Any]) -> str:
-    return GROUP_INSTRUCTIONS + "\n<data>\n" + json.dumps(request, ensure_ascii=False) + "\n</data>\n"
+    return GROUP_INSTRUCTIONS + "\n<data>\n" + _prompt_json(request) + "\n</data>\n"
 
 
 def parse_group_response(text: Any, ids: dict[str, str], groups, rejected=frozenset()) -> GroupOutcome:

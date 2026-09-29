@@ -26,7 +26,8 @@ import yaml
 from .matching import match_columns
 from .merge import MAX_FILES, FilePlan
 from .normalize import DATE, TEXT, _YMD_COMPACT, MAX_DATE_TEXT, display, is_blank, normalize_header, parse_date
-from .reader import ReadError, SourceTable, detect_header_row_generic, read_table, row_labels, scan_tops
+from .reader import (MAX_LABEL_CHARS, ReadError, SourceTable, detect_header_row_generic, read_table, row_labels,
+                     scan_tops)
 from .scenario import (K_ALIASES, K_COLUMNS, K_DESC, K_DUP, K_FORMAT, K_NAME, K_REQUIRED, K_STD, MAX_ALIASES,
                        MAX_COLUMNS, MAX_YAML_BYTES, SCENARIO_KEY_RE, Scenario, ScenarioError, parse_scenario)
 from .writer import SOURCE_COLS
@@ -124,14 +125,17 @@ def _columns(tables: Sequence[SourceTable]) -> list[SourceColumn]:
         for ci, raw in enumerate(t.raw_headers):
             if is_blank(raw):
                 continue
+            name = str(raw).strip()
+            if len(name) > MAX_LABEL_CHARS:   # 너무 긴 이름은 묶지 않는다 (화면·YAML 크기, 보안 검토 F-5)
+                continue
             norm = normalize_header(raw)
             if norm:
-                out.append(SourceColumn(fi, ci, str(raw).strip(), norm))
+                out.append(SourceColumn(fi, ci, name, norm))
     return out
 
 
 def skipped_columns(tables: Sequence[SourceTable]) -> list[tuple[int, int]]:
-    """머리글이 비었거나 글자·숫자가 없어 묶을 수 없는 열 (파일 번호, 열 위치)."""
+    """머리글이 비었거나, 글자·숫자가 없거나, 100자를 넘어 묶을 수 없는 열 (파일 번호, 열 위치)."""
     used = {(c.file_index, c.col_index) for c in _columns(tables)}
     return [(fi, ci) for fi, t in enumerate(tables) for ci in range(len(t.raw_headers)) if (fi, ci) not in used]
 

@@ -550,7 +550,9 @@ def md(text: Any) -> str:
     이스케이프하지 않으면 열 이름에 적힌 ![](외부 주소) 이미지가 열람자 브라우저에서 불러와지고,
     [링크](주소)나 :red-background[가짜 공지]가 앱 화면 안에 그려진다 (보안 검토 D-1).
     """
-    s = " ".join(str(text).split("\n"))
+    # 줄바꿈 계열(\n, \r,  , \x85 …)과 탭은 모두 공백 하나로 바꾼다. \r 이 남으면 열 이름으로
+    # 가짜 문단·코드 블록을 끼워 넣을 수 있었다 (자유 양식 보안 검토 F-3)
+    s = " ".join(str(text).split())
     return "".join("\\" + ch if ch in _MD_SPECIAL else ch for ch in s)
 
 
@@ -893,6 +895,8 @@ def init_free_state(tables, paths) -> None:
     ss.ff_ai_message = None
     ss.ff_msg = None
     ss.ff_order = None           # 결과 열 순서 (묶음 id)
+    ss.ff_tables_ver = 0         # 파일을 다시 읽을 때마다 늘린다 (날짜 판단 캐시 키)
+    ss.ff_date_cache = {}
     ss.ff_gid_norms = {}
     ss.ff_known = set()
     ss.ff_form_name = ff.DEFAULT_NAME
@@ -911,17 +915,25 @@ def on_free_change() -> None:
 def on_header_change(file_name: str, key: str) -> None:
     """머리글 행을 바꾸면 모든 파일을 다시 읽는다 (다른 파일의 머리글 후보도 함께 비교하므로)."""
     ss = st.session_state
-    ss.ff_header_rows[file_name] = int(ss[key])
+    row = int(ss[key])
+    fi = next((i for i, t in enumerate(ss.ff_tables) if t.file_name == file_name), None)
+    if fi is None or ss.ff_tables[fi].header_row == row and ss.ff_tables[fi].header_confidence == "지정":
+        return
+    ss.ff_header_rows[file_name] = row
+    # 바꾼 파일 하나만 다시 읽는다 (행을 직접 지정했으므로 다른 파일의 머리글 후보는 필요 없다, 보안 검토 F-6)
+    path = next(p for p in ss.ff_paths if Path(p).name == file_name)
     try:
-        tables = run_job("scan", ss.ff_paths, MAX_ROWS, dict(ss.ff_header_rows),
-                         timeout=TIME_LIMIT, memory_mb=JOB_MEMORY_MB)
+        [table] = run_job("scan", [path], MAX_ROWS, {file_name: row}, timeout=TIME_LIMIT, memory_mb=JOB_MEMORY_MB)
     except TimeLimitError as e:
         ss.ff_msg = ("error", f"처리 시간 제한에 걸렸습니다. {e}")
         return
     except (ReadError, ScenarioError, JobError) as e:
         ss.ff_msg = ("error", f"파일을 다시 읽지 못했습니다. {e}")
         return
+    tables = list(ss.ff_tables)
+    tables[fi] = table
     ss.ff_tables = tables
+    ss.ff_tables_ver += 1
     reset_from("result")
 
 
@@ -997,6 +1009,9 @@ def on_split_click(key: str) -> None:
 
 def run_free_ai(groups, api_key: str, model: str) -> None:
     ss = st.session_state
+    if any(t.header_confidence == "낮음" for t in ss.ff_tables):
+        ss.ff_ai_message = ("warning", "머리글을 확실히 찾지 못한 파일이 있어 AI 추천을 보내지 않았습니다.")
+        return
     ss.ai_calls += 1
     try:
         with st.spinner("AI에게 묶기 추천을 받는 중입니다…"):
@@ -1047,6 +1062,8 @@ def render_free_ai(groups) -> None:
     request, _ = ai_match.build_group_request(groups, ss.ff_rejected)
     need = len(request["columns"]) >= 2
     left = ai_match.MAX_CALLS_PER_SESSION - ss.ai_calls
+    # 머리글을 확실히 찾지 못한 파일이 있으면 데이터 행이 머리글로 잡혔을 수 있어 AI를 막는다 (보안 검토 F-2)
+    unsure = [t.file_name for t in ss.ff_tables if t.header_confidence == "낮음"]
     with st.container(border=True, key="ff_ai_box"):
         st.markdown("**AI 묶기 추천 (선택)** — 이름은 다르지만 같은 뜻으로 보이는 열을 AI가 찾아 추천합니다. "
                     "추천은 확인한 뒤에만 묶입니다.")
@@ -1055,15 +1072,20 @@ def render_free_ai(groups) -> None:
         if not need:
             st.caption("더 묶을 수 있는 열이 없어 AI 추천이 필요 없습니다.")
         else:
-            st.caption(f"Google Gemini({md(model)})로 보내는 내용: 열 이름만 (데이터 값·파일 이름은 보내지 않음). "
+            st.caption(f"Google Gemini({md(model)})로 보내는 내용: 머리글로 잡힌 행의 열 이름만 (그 아래 데이터 값·파일 "
+                       "이름은 보내지 않음). 숫자·날짜·이메일·전화번호처럼 데이터 값으로 보이는 이름은 빼고, "
                        "묶음은 C1, C2 같은 번호로 바꿔 보냅니다.")
+            if unsure:
+                st.warning(md("머리글을 확실히 찾지 못한 파일이 있어 AI 추천을 막았습니다: " + ", ".join(unsure)
+                              + ". 위의 머리글 확인에서 머리글 행 번호를 지정하면 쓸 수 있습니다."))
             if ai_match.group_request_is_trimmed(groups, ss.ff_rejected):
                 st.caption(f"한 번에 묶음 {ai_match.MAX_AI_GROUPS}개, 묶음마다 이름 "
                            f"{ai_match.MAX_NAMES_PER_GROUP}개까지만 보냅니다.")
             with st.expander("전송될 내용 미리 보기"):
                 st.code(ai_match.preview_text(request), language="json")
-            clicked = st.button("AI에게 묶기 추천 받기", key="ff_ai_btn", disabled=not api_key or left <= 0)
-            if clicked and api_key and left > 0:
+            blocked = not api_key or left <= 0 or bool(unsure)
+            clicked = st.button("AI에게 묶기 추천 받기", key="ff_ai_btn", disabled=blocked)
+            if clicked and not blocked:
                 run_free_ai(groups, api_key, model)
                 st.rerun()
         st.caption(f"남은 AI 호출: {max(left, 0)}/{ai_match.MAX_CALLS_PER_SESSION}회 (세션당, 열 매칭 AI와 함께 셈)")
@@ -1100,7 +1122,7 @@ def render_free_groups(tables, groups) -> None:
     if skipped:
         shown = ", ".join(f"{tables[fi].file_name} {get_column_letter(ci + 1)}열" for fi, ci in skipped[:20])
         more = f" 외 {len(skipped) - 20}개" if len(skipped) > 20 else ""
-        st.caption("머리글이 비어 있어 묶지 않은 열: " + md(shown) + more)
+        st.caption("머리글이 비었거나 100자를 넘어 묶지 않은 열: " + md(shown) + more)
     labels = {g.gid: f"{g.label} ({len(g.files)}/{n}개 파일)" for g in groups}
     pick_key = f"ff_merge_pick_{ss.load_id}"
     if pick_key in ss:
@@ -1124,10 +1146,13 @@ def sync_free_order(groups) -> None:
     """묶음이 바뀐 뒤 결과 열 순서와 설정 위젯 값을 맞춘다."""
     ss = st.session_state
     if ss.ff_order is None:
-        ss.ff_order = [g.gid for g in groups]            # 기본은 모든 묶음, 처음 나온 순서
+        # 기본은 모든 묶음, 처음 나온 순서. 단 결과 열 상한(100개)까지만: 열이 아주 많은 파일에서
+        # 화면을 그릴 때마다 수천 개 위젯을 만들지 않게 한다 (보안 검토 F-1)
+        ss.ff_order = [g.gid for g in groups][:MAX_RESULT_COLUMNS]
         inherit = {}
     else:
         ss.ff_order, inherit = ff.sync_order(ss.ff_order, groups, ss.ff_gid_norms, ss.ff_known)
+        ss.ff_order = ss.ff_order[:MAX_RESULT_COLUMNS]
     labels = {g.gid: g.label for g in groups}
     for new, (old, keep_name) in inherit.items():
         for kind in ("req", "dup"):
@@ -1175,6 +1200,16 @@ def on_dup_change(req_key: str, dup_key: str) -> None:
 
 
 ROW_WIDTHS = [0.55, 0.55, 3, 0.9, 1.5, 3.5]
+MAX_RESULT_COLUMNS = ff.MAX_COLUMNS   # 결과에 넣을 수 있는 열 수 (시나리오 YAML 상한과 같다)
+
+
+def date_check(tables, g):
+    """날짜 판단 결과를 세션에 캐시한다 (파일을 다시 읽을 때만 새로 계산, 보안 검토 F-1)."""
+    ss = st.session_state
+    key = (ss.ff_tables_ver, g.gid)
+    if key not in ss.ff_date_cache:
+        ss.ff_date_cache[key] = ff.check_dates(tables, g)
+    return ss.ff_date_cache[key]
 
 
 def render_free_columns(tables, groups):
@@ -1188,7 +1223,10 @@ def render_free_columns(tables, groups):
     pick_key = f"ff_pick_{ss.load_id}"
     ss[pick_key] = list(ss.ff_order)
     st.multiselect("결과에 넣을 열", list(by_gid), key=pick_key, format_func=lambda g: by_gid[g].label,
-                   on_change=on_pick_change, args=(pick_key,), placeholder="결과에 넣을 열을 고르세요")
+                   on_change=on_pick_change, args=(pick_key,), placeholder="결과에 넣을 열을 고르세요",
+                   max_selections=MAX_RESULT_COLUMNS)
+    if len(groups) > MAX_RESULT_COLUMNS:
+        st.caption(f"묶음이 {len(groups):,}개입니다. 결과에는 최대 {MAX_RESULT_COLUMNS}개 열까지 넣을 수 있습니다.")
     if not ss.ff_order:
         st.info("결과에 넣을 열을 하나 이상 골라 주세요.")
         return [], set(), []
@@ -1205,7 +1243,7 @@ def render_free_columns(tables, groups):
         nk, rk, dk = free_key("name", gid), free_key("req", gid), free_key("dup", gid)
         if ss[dk]:
             ss[rk] = True
-        check = ff.check_dates(tables, g)
+        check = date_check(tables, g)
         if check.is_date:
             dates.add(gid)
         elif check.mixed:
