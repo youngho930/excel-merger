@@ -151,10 +151,14 @@ APP_CSS = """<style>
   .xm-hero { grid-template-columns: minmax(0, 1fr); gap: 0.75rem; }
   .xm-chips { margin-bottom: 0.6rem; }
   .xm-sub { font-size: 0.875rem; line-height: 1.5; margin-top: 0.45rem; }
-  .xm-stats { padding: 0.35rem 1rem; }
-  .xm-wrap .xm-stats { padding-left: 1rem !important; }
-  .xm-stats li { padding: 0.28rem 0; gap: 0; }
-  .xm-stats b { font-size: 1.3rem; }
+  /* 모바일: 숫자 카드 3개를 가로 한 줄(3칸)로 작게. 설명은 두 줄까지 */
+  .xm-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0.55rem 0.25rem; }
+  .xm-wrap .xm-stats { padding-left: 0.25rem !important; }
+  .xm-stats li { padding: 0 0.55rem; gap: 0.15rem; min-width: 0; }
+  .xm-stats li + li { border-top: 0; border-left: 1px solid var(--xm-line); }
+  .xm-stats b { font-size: 1.15rem; }
+  .xm-stats span { font-size: 0.7rem; line-height: 1.3; word-break: keep-all; overflow: hidden;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 }
 
 /* 작동 흐름 띠 */
@@ -174,15 +178,16 @@ APP_CSS = """<style>
 .xm-flow-text b { font-size: 0.9rem; font-weight: 700; line-height: 1.35; word-break: keep-all; }
 .xm-flow-text small { font-size: 0.75rem; color: var(--xm-muted); line-height: 1.4; word-break: keep-all; }
 .xm-flow-text i { font-style: normal; color: var(--xm-accent-2); }
-/* 좁은 화면: 체험 버튼을 밀어내지 않도록 작은 알약 모양으로 줄바꿈하고, 한 줄 설명은 숨긴다 */
+/* 좁은 화면: 세로 목록. 단계마다 아이콘 + 이름 한 줄, 단계 사이 화살표는 아래(↓). 한 줄 설명은 숨긴다 */
 @container (max-width: 640px) {
-  .xm-band { padding: 0.6rem 0.75rem 0.7rem; }
+  .xm-band { padding: 0.6rem 0.9rem 0.65rem; }
   .xm-band-title { display: none; }   /* section 의 aria-label("작동 흐름")은 그대로 남는다 */
-  .xm-flow { display: flex; flex-wrap: wrap; gap: 0.4rem 1.15rem; }
-  .xm-flow li { flex-direction: row; text-align: left; gap: 0.3rem; }
-  .xm-flow li:not(:last-child)::after { right: -0.85rem; top: 50%; transform: translateY(-50%); font-size: 0.75rem; }
+  .xm-flow { display: flex; flex-direction: column; gap: 0.95rem; }
+  .xm-flow li { flex-direction: row; align-items: center; text-align: left; gap: 0.55rem; }
+  .xm-flow li:not(:last-child)::after { content: "\\2193" / ""; right: auto; left: 0.4rem;
+    top: calc(100% + 0.05rem); font-size: 0.75rem; }
   .xm-flow-icon { width: 1.5rem; height: 1.5rem; border-radius: 0.4rem; font-size: 1rem; }
-  .xm-flow-text b { font-size: 0.78rem; white-space: nowrap; }
+  .xm-flow-text b { font-size: 0.82rem; white-space: nowrap; }
   .xm-flow-text small { display: none; }
 }
 
