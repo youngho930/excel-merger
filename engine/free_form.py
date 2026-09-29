@@ -206,6 +206,44 @@ def remove_merges(merges: Sequence[tuple[Iterable[str], str]], group: ColumnGrou
     return [(frozenset(n), o) for n, o in merges if not (set(n) & norms)]
 
 
+def sync_order(order: Sequence[str], groups: Sequence[ColumnGroup], gid_norms: dict[str, Iterable[str]],
+               known_norms: Iterable[str]) -> tuple[list[str], dict[str, tuple[str, bool]]]:
+    """묶음이 바뀐 뒤(묶기·풀기·머리글 다시 읽기) 결과 열 순서를 맞춘다.
+
+    - 그대로 있는 묶음은 자리를 지킨다.
+    - 다른 묶음과 합쳐진 묶음은 합친 묶음이 그 자리를 이어받는다 (설정도 물려받음, 이름 포함).
+    - 풀린 묶음은 조각들이 그 자리에 들어간다 (필수·중복 설정만 물려받고 이름은 조각 이름).
+    - 처음 보는 이름이 있는 묶음(머리글 행을 바꿔 새로 생긴 열)은 맨 뒤에 넣는다. 사용자가 뺀 열은 다시 넣지 않는다.
+    돌려주는 값: (새 순서, 새 묶음 id -> (설정을 물려줄 옛 묶음 id, 이름도 물려받는지)).
+    """
+    known = set(known_norms)
+    norms_of = {g.gid: set(g.norms) for g in groups}
+    out: list[str] = []
+    inherit: dict[str, tuple[str, bool]] = {}
+    for gid in order:
+        if gid in norms_of:
+            if gid not in out:
+                out.append(gid)
+            continue
+        old = set(gid_norms.get(gid, ()))
+        if not old:
+            continue
+        bigger = [g.gid for g in groups if old <= norms_of[g.gid]]
+        if bigger:
+            if bigger[0] not in out:
+                out.append(bigger[0])
+                inherit.setdefault(bigger[0], (gid, True))
+            continue
+        for g in groups:
+            if norms_of[g.gid] & old and g.gid not in out:
+                out.append(g.gid)
+                inherit.setdefault(g.gid, (gid, False))
+    for g in groups:
+        if g.gid not in out and not norms_of[g.gid] <= known:
+            out.append(g.gid)
+    return out, inherit
+
+
 # ------------------------------------------------------------------ 날짜 판단
 @dataclass
 class DateCheck:

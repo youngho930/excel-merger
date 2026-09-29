@@ -21,14 +21,16 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 import yaml
+from openpyxl.utils import get_column_letter
 
 from engine import KINDS, ReadError, ScenarioError, list_scenarios, pre_run_warnings
 from engine import ai_match
 from engine import limits as limits_mod
 from engine.jobs import JobError, TimeLimitError, run_job, set_max_concurrent
+from engine import free_form as ff
 from engine.matching import AI, USER
-from engine.normalize import display
-from engine.reader import EXCEL_SUFFIXES, read_table
+from engine.normalize import DATE, display
+from engine.reader import EXCEL_SUFFIXES, HEADER_SCAN_ROWS, read_table
 from engine.writer import ACTION_COL, ERROR_COLS
 
 ROOT = Path(__file__).resolve().parent
@@ -67,6 +69,12 @@ DEMO_MANIFEST = "demo.yaml"           # samples/<폴더>/demo.yaml 이 있으면
 MAX_KEPT_OUTPUTS = 2                  # 세션마다 남겨 두는 결과 파일 수 (나머지는 지운다)
 
 NO_SOURCE = "(선택 안 함)"
+# 자유 양식: 선택 목록의 값. 파일 이름에는 '/'를 쓸 수 없으므로 scenarios/*.yaml 의 key 와 겹치지 않는다
+FREE_OPTION = "/free_form"
+FREE_LABEL = "자유 양식 (직접 열 정하기)"
+FREE_HELP = "미리 정한 시나리오 없이, 올린 파일들의 머리글을 보고 결과에 넣을 열과 순서를 직접 정합니다."
+FREE_SAMPLE_DIR = SAMPLE_DIR / "free_form"    # "자유 양식 체험" 파일 (시나리오 샘플 폴더가 아니다)
+HEADER_PREVIEW_ROWS = 2                       # 머리글 미리보기에서 머리글 아래로 보여줄 데이터 행 수
 REPO_URL = "https://github.com/youngho930/excel-merger"
 PREVIEW_ROWS = 3                      # 샘플 미리보기에 보여줄 데이터 행 수
 
@@ -83,6 +91,9 @@ GLOSSARY = {
     "남은 오류": "직접 확인해야 할 오류입니다. 전체 오류에서 처리됨을 뺀 수입니다.",
     "전체 오류": "파일에서 찾은 모든 오류입니다. 처리해도 이 수는 줄지 않습니다.",
     "처리": "그 오류를 어떻게 처리했는지 적는 칸입니다. 자동 수정됨 / 행 제외됨 / 중복 해소. 빈칸이면 아직 남은 오류입니다.",
+    "묶음": "여러 파일에서 같은 열로 모을 원본 열들의 모음입니다. 이름이 같거나 띄어쓰기·대소문자·기호만 다르면 "
+           "자동으로 묶고, 이름이 다른 같은 뜻의 열(예: 고객명·성명)은 직접 묶거나 AI 추천을 받아 묶습니다.",
+    "날짜로 비교": "빈칸을 뺀 값이 모두 날짜로 읽히는 열은 날짜로 비교합니다. 2026-09-01, 2026.9.1, 엑셀 날짜 칸을 같은 날로 봅니다.",
 }
 
 
@@ -210,6 +221,13 @@ APP_CSS = """<style>
 }
 .st-key-metric_remaining [data-testid="stMetric"] { border-color: var(--xm-accent) !important;
   background: rgba(33, 163, 102, 0.08); }
+
+/* 체험 버튼 3개: 좁은 화면(390px)에서도 한 줄에 들어가도록 모바일에서만 좌우 여백·글자·간격을 줄인다 */
+@media (max-width: 640px) {
+  .st-key-demo_buttons { gap: 0.3rem !important; }
+  .st-key-demo_buttons button { padding-left: 0.35rem !important; padding-right: 0.35rem !important; }
+  .st-key-demo_buttons button p { font-size: 0.75rem !important; }
+}
 
 /* 강조색 버튼: 초록 위 흰 글자는 대비가 낮아 어두운 글자를 쓴다 */
 [data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primary"] p { color: var(--xm-accent-ink) !important; }
@@ -416,6 +434,11 @@ def reset_from(stage: str) -> None:
         ss.load_id = None
         ss.load_source = None
         ss.ai_message = None
+        ss.ff_tables = None      # 자유 양식 상태
+        ss.ff_paths = None
+        ss.ff_proposals = None
+        ss.ff_ai_message = None
+        ss.ff_msg = None
     ss.result = None
     ss.result_id = None
     ss.outputs = {}
@@ -439,7 +462,9 @@ def init_state() -> None:
     defaults = {"plans": None, "load_id": None, "load_source": None, "result": None, "outputs": {},
                 "messages": [], "upload_sig": None, "uploader_n": 0, "map_error": None,
                 "apply_pref": False, "excluded": set(), "result_id": None, "current_output": None,
-                "pending_demo": None, "ai_calls": 0, "ai_message": None}
+                "pending_demo": None, "ai_calls": 0, "ai_message": None,
+                "pending_free": False, "ff_tables": None, "ff_paths": None, "ff_proposals": None,
+                "ff_ai_message": None, "ff_msg": None}
     for k, v in defaults.items():
         if k not in ss:
             ss[k] = v
@@ -616,9 +641,15 @@ def load_files(scenario, items: list[tuple[str, Any]], source: str) -> None:
         paths.append(dest)
 
     try:
-        with st.spinner("파일을 읽고 열을 맞추는 중입니다…"):
-            plans = run_job("prepare", scenario, paths, None, MAX_ROWS,
-                            timeout=TIME_LIMIT, memory_mb=JOB_MEMORY_MB)
+        if scenario is None:   # 자유 양식: 시나리오 없이 읽는다 (머리글 자동 탐지)
+            with st.spinner("파일을 읽고 머리글을 찾는 중입니다…"):
+                tables = run_job("scan", paths, MAX_ROWS, None, timeout=TIME_LIMIT, memory_mb=JOB_MEMORY_MB)
+            plans = None
+        else:
+            with st.spinner("파일을 읽고 열을 맞추는 중입니다…"):
+                plans = run_job("prepare", scenario, paths, None, MAX_ROWS,
+                                timeout=TIME_LIMIT, memory_mb=JOB_MEMORY_MB)
+            tables = [p.table for p in plans]
     except TimeLimitError as e:
         say("error", f"처리 시간 제한에 걸렸습니다. {e}")
         return
@@ -626,7 +657,7 @@ def load_files(scenario, items: list[tuple[str, Any]], source: str) -> None:
         say("error", f"파일을 읽지 못했습니다. {e}")
         return
 
-    total = sum(len(p.table.rows) for p in plans)
+    total = sum(len(t.rows) for t in tables)
     if total > MAX_TOTAL_ROWS:
         say("error", f"행 수 제한에 걸렸습니다: 모든 파일의 데이터가 합계 {total:,}행입니다 "
                      f"(최대 {MAX_TOTAL_ROWS:,}행). 파일을 나눠서 취합해 주세요.")
@@ -636,6 +667,8 @@ def load_files(scenario, items: list[tuple[str, Any]], source: str) -> None:
     ss.load_id = uuid.uuid4().hex[:8]
     ss.load_source = source
     ss.map_error = None
+    if scenario is None:
+        init_free_state(tables, paths)
 
 
 def sample_files(scenario) -> list[Path]:
@@ -826,6 +859,470 @@ def render_matching(scenario) -> None:
             st.caption("매칭 안 된 원본 열: " + (md(", ".join(unmatched)) if unmatched else "없음"))
 
 
+# ================================================================== 자유 양식
+# 화면에 보이는 열 이름·파일 이름·결과 열 이름·예시 값은 모두 업로드된 파일이나 사용자 입력에서 온 글자다.
+# 마크다운 요소(markdown·caption·warning·위젯 라벨)에 넣을 때는 반드시 md()를 거친다. st.html 에는 넣지 않는다.
+def is_free() -> bool:
+    return st.session_state.get("scenario") == FREE_OPTION
+
+
+def free_sample_files() -> list[Path]:
+    if not FREE_SAMPLE_DIR.is_dir():
+        return []
+    return sorted(p for p in FREE_SAMPLE_DIR.iterdir()
+                  if p.is_file() and p.suffix.lower() in EXCEL_SUFFIXES and not p.name.startswith("~$"))
+
+
+def on_free_demo_click() -> None:
+    ss = st.session_state
+    ss.scenario = FREE_OPTION
+    on_scenario_change()
+    ss.uploader_n += 1
+    ss.pending_free = True
+
+
+def init_free_state(tables, paths) -> None:
+    ss = st.session_state
+    ss.ff_tables = tables
+    ss.ff_paths = list(paths)
+    ss.ff_header_rows = {}
+    ss.ff_merges = []            # (정규화 이름들, 묶은 방법): 머리글을 다시 읽어도 남도록 이름으로 기억
+    ss.ff_rejected = set()       # 따로 두기로 한 이름 쌍 (AI가 다시 추천하지 않음)
+    ss.ff_proposals = None
+    ss.ff_prop_id = None
+    ss.ff_ai_message = None
+    ss.ff_msg = None
+    ss.ff_order = None           # 결과 열 순서 (묶음 id)
+    ss.ff_gid_norms = {}
+    ss.ff_known = set()
+    ss.ff_form_name = ff.DEFAULT_NAME
+    ss.ff_file_key = f"free_form_{time.strftime('%Y%m%d')}"
+
+
+def free_groups():
+    ss = st.session_state
+    return ff.regroup(ss.ff_tables, ss.ff_merges)
+
+
+def on_free_change() -> None:
+    reset_from("result")
+
+
+def on_header_change(file_name: str, key: str) -> None:
+    """머리글 행을 바꾸면 모든 파일을 다시 읽는다 (다른 파일의 머리글 후보도 함께 비교하므로)."""
+    ss = st.session_state
+    ss.ff_header_rows[file_name] = int(ss[key])
+    try:
+        tables = run_job("scan", ss.ff_paths, MAX_ROWS, dict(ss.ff_header_rows),
+                         timeout=TIME_LIMIT, memory_mb=JOB_MEMORY_MB)
+    except TimeLimitError as e:
+        ss.ff_msg = ("error", f"처리 시간 제한에 걸렸습니다. {e}")
+        return
+    except (ReadError, ScenarioError, JobError) as e:
+        ss.ff_msg = ("error", f"파일을 다시 읽지 못했습니다. {e}")
+        return
+    ss.ff_tables = tables
+    reset_from("result")
+
+
+def header_preview(t) -> pd.DataFrame:
+    """머리글 행과 그 아래 몇 행. 열 이름이 겹칠 수 있어 표의 열은 엑셀 열 글자(A, B, …)로 둔다."""
+    width = len(t.raw_headers)
+    letters = [get_column_letter(i + 1) for i in range(width)]
+    rows = [[f"{t.header_row}행 (머리글)"] + [cell_text(v) for v in t.raw_headers]]
+    for r in t.rows[:HEADER_PREVIEW_ROWS]:
+        rows.append([f"{r.excel_row}행"] + [cell_text(v) for v in r.cells[:width]])
+    return pd.DataFrame(rows, columns=["행"] + letters)
+
+
+def render_free_headers(tables) -> None:
+    ss = st.session_state
+    st.markdown("**① 머리글 확인**")
+    st.caption("파일마다 찾은 머리글 행과 그 아래 몇 행입니다. 틀렸으면 머리글 행 번호를 바꿔 주세요.")
+    for fi, t in enumerate(tables):
+        low = t.header_confidence == "낮음"
+        with st.container(border=True, key=f"ff_file_{fi}"):
+            left, right = st.columns([5, 1], vertical_alignment="bottom")
+            state = {"낮음": " · :orange[**확인 필요**]", "지정": " · 직접 지정"}.get(t.header_confidence, "")
+            left.markdown(f"**{md(t.file_name)}** — 감지된 머리글: **{t.header_row}행**{state} · 데이터 {len(t.rows):,}행")
+            key = f"ff_hr_{ss.load_id}_{fi}"
+            if key not in ss:
+                ss[key] = t.header_row
+            right.number_input("머리글 행", min_value=1, max_value=HEADER_SCAN_ROWS, step=1, key=key,
+                               on_change=on_header_change, args=(t.file_name, key))
+            if low:
+                st.warning(md(f"머리글 행을 확실히 찾지 못해 {t.header_row}행으로 가정했습니다. "
+                              "아래 미리보기를 보고 틀렸으면 머리글 행 번호를 바꿔 주세요."))
+            st.dataframe(header_preview(t), hide_index=True, width="stretch")
+
+
+def on_merge_click(pick_key: str) -> None:
+    ss = st.session_state
+    groups = free_groups()
+    picked = [g for g in ss.get(pick_key, []) if g in {x.gid for x in groups}]
+    try:
+        merged = ff.merge_groups(groups, picked, ff.USER, [t.file_name for t in ss.ff_tables])
+    except ff.FreeFormError as e:
+        ss.ff_msg = ("error", str(e))
+        return
+    new = next(g for g in merged if g.gid not in {x.gid for x in groups})
+    ss.ff_merges.append((frozenset(new.norms), ff.USER))
+    ss[pick_key] = []
+    ss.ff_msg = ("success", f"{len(picked)}개 열을 한 묶음('{new.label}')으로 묶었습니다.")
+    reset_from("result")
+
+
+def _reject_pairs(norm_sets) -> set:
+    """서로 다른 묶음의 이름 쌍 (따로 두기 기록용)."""
+    out = set()
+    for i, a in enumerate(norm_sets):
+        for b in norm_sets[i + 1:]:
+            out.update(frozenset((x, y)) for x in a for y in b)
+    return out
+
+
+def on_split_click(key: str) -> None:
+    ss = st.session_state
+    g = next((x for x in free_groups() if x.gid == ss.get(key)), None)
+    if g is None:
+        return
+    if g.origin == ff.AI:
+        # AI가 묶은 것을 사용자가 풀면 따로 두기로 한 것으로 보고 다시 추천하지 않는다
+        parts = [set(x.norms) for x in ff.group_headers(ss.ff_tables) if set(x.norms) <= set(g.norms)]
+        ss.ff_rejected |= _reject_pairs(parts)
+    ss.ff_merges = ff.remove_merges(ss.ff_merges, g)
+    ss.ff_msg = ("success", f"'{g.label}' 묶음을 풀었습니다.")
+    reset_from("result")
+
+
+def run_free_ai(groups, api_key: str, model: str) -> None:
+    ss = st.session_state
+    ss.ai_calls += 1
+    try:
+        with st.spinner("AI에게 묶기 추천을 받는 중입니다…"):
+            outcome = ai_match.recommend_groups(groups, api_key=api_key, model=model, rejected=ss.ff_rejected)
+    except ai_match.AiError as e:
+        if isinstance(e, (ai_match.AiNotSent, ai_match.AiBusy)):
+            ss.ai_calls -= 1     # 보내지 않았거나 Google 쪽 일시적 오류면 세션 횟수에 넣지 않는다
+        ss.ff_ai_message = ("warning", f"AI 추천을 받지 못했습니다. {e} 직접 묶기는 그대로 쓸 수 있습니다.")
+        return
+    ss.ff_proposals = outcome.proposals
+    ss.ff_prop_id = uuid.uuid4().hex[:8]
+    dropped = f" 검증에서 버린 추천: {outcome.dropped_text()}." if outcome.dropped else ""
+    if outcome.proposals:
+        ss.ff_ai_message = ("success", f"AI 추천 {len(outcome.proposals)}건을 받았습니다. 아래에서 확인하고 "
+                                       f"'추천 적용'을 눌러야 묶입니다. 묶지 않을 추천은 체크를 끄세요.{dropped}")
+    else:
+        ss.ff_ai_message = ("info", f"AI가 확실히 같은 뜻인 열을 찾지 못했습니다. 필요하면 직접 묶어 주세요.{dropped}")
+
+
+def on_apply_proposals() -> None:
+    ss = st.session_state
+    applied = rejected = 0
+    for i, proposal in enumerate(ss.ff_proposals or []):
+        groups = free_groups()
+        by_gid = {g.gid: g for g in groups}
+        members = [by_gid[g] for g in proposal if g in by_gid]
+        if len(members) < 2:
+            continue
+        if ss.get(f"ff_prop_{ss.ff_prop_id}_{i}", True):
+            try:
+                ff.merge_groups(groups, [m.gid for m in members], ff.AI)
+            except ff.FreeFormError:
+                continue
+            ss.ff_merges.append((frozenset(n for m in members for n in m.norms), ff.AI))
+            applied += 1
+        else:
+            ss.ff_rejected |= _reject_pairs([set(m.norms) for m in members])
+            rejected += 1
+    ss.ff_proposals = None
+    ss.ff_ai_message = ("success", f"AI 추천 {applied}건을 적용했습니다('AI 추천'으로 표시, 풀 수 있음)."
+                        + (f" 따로 두기 {rejected}건은 다시 추천하지 않습니다." if rejected else ""))
+    reset_from("result")
+
+
+def render_free_ai(groups) -> None:
+    ss = st.session_state
+    api_key, model = ai_settings()
+    request, _ = ai_match.build_group_request(groups, ss.ff_rejected)
+    need = len(request["columns"]) >= 2
+    left = ai_match.MAX_CALLS_PER_SESSION - ss.ai_calls
+    with st.container(border=True, key="ff_ai_box"):
+        st.markdown("**AI 묶기 추천 (선택)** — 이름은 다르지만 같은 뜻으로 보이는 열을 AI가 찾아 추천합니다. "
+                    "추천은 확인한 뒤에만 묶입니다.")
+        if not api_key:
+            st.info("AI 없이 직접 묶기만 사용 중입니다. AI 추천을 쓰려면 관리자가 GEMINI_API_KEY를 설정해야 합니다.")
+        if not need:
+            st.caption("더 묶을 수 있는 열이 없어 AI 추천이 필요 없습니다.")
+        else:
+            st.caption(f"Google Gemini({md(model)})로 보내는 내용: 열 이름만 (데이터 값·파일 이름은 보내지 않음). "
+                       "묶음은 C1, C2 같은 번호로 바꿔 보냅니다.")
+            if ai_match.group_request_is_trimmed(groups, ss.ff_rejected):
+                st.caption(f"한 번에 묶음 {ai_match.MAX_AI_GROUPS}개, 묶음마다 이름 "
+                           f"{ai_match.MAX_NAMES_PER_GROUP}개까지만 보냅니다.")
+            with st.expander("전송될 내용 미리 보기"):
+                st.code(ai_match.preview_text(request), language="json")
+            clicked = st.button("AI에게 묶기 추천 받기", key="ff_ai_btn", disabled=not api_key or left <= 0)
+            if clicked and api_key and left > 0:
+                run_free_ai(groups, api_key, model)
+                st.rerun()
+        st.caption(f"남은 AI 호출: {max(left, 0)}/{ai_match.MAX_CALLS_PER_SESSION}회 (세션당, 열 매칭 AI와 함께 셈)")
+        if left <= 0:
+            st.warning(f"이 세션의 AI 호출 횟수({ai_match.MAX_CALLS_PER_SESSION}회)를 모두 썼습니다. 직접 묶어 주세요.")
+        if ss.ff_ai_message:
+            kind, text = ss.ff_ai_message
+            getattr(st, kind)(md(text))
+        by_gid = {g.gid: g for g in groups}
+        proposals = [p for p in (ss.ff_proposals or []) if all(g in by_gid for g in p)]
+        if proposals:
+            st.markdown("**AI 추천 (확인 후 적용)**")
+            for i, p in enumerate(ss.ff_proposals):
+                if not all(g in by_gid for g in p):
+                    continue
+                key = f"ff_prop_{ss.ff_prop_id}_{i}"
+                if key not in ss:
+                    ss[key] = True
+                st.checkbox(md(" + ".join(by_gid[g].label for g in p)) + " → 같은 열로 묶기", key=key)
+            st.button("추천 적용", key="ff_apply_props", type="primary", on_click=on_apply_proposals,
+                      help="체크한 추천은 묶고, 체크를 끈 추천은 따로 두기로 기록해 다시 추천하지 않습니다.")
+
+
+def render_free_groups(tables, groups) -> None:
+    ss = st.session_state
+    st.markdown("**② 열 묶기**", help=GLOSSARY["묶음"])
+    st.caption("이름이 같거나 띄어쓰기·대소문자·기호만 다른 열은 자동으로 묶었습니다. 이름은 다르지만 같은 뜻인 열"
+               "(예: 고객명·성명)은 직접 묶거나 AI 추천을 받으세요. 같은 파일에 함께 있는 두 열은 묶을 수 없습니다.")
+    n = len(tables)
+    st.dataframe(pd.DataFrame([{"묶음": g.label, "원본 열 이름": ", ".join(g.names), "있는 파일": f"{len(g.files)}/{n}",
+                                "묶은 방법": g.origin} for g in groups]),
+                 hide_index=True, width="stretch", key="ff_group_table")
+    skipped = ff.skipped_columns(tables)
+    if skipped:
+        shown = ", ".join(f"{tables[fi].file_name} {get_column_letter(ci + 1)}열" for fi, ci in skipped[:20])
+        more = f" 외 {len(skipped) - 20}개" if len(skipped) > 20 else ""
+        st.caption("머리글이 비어 있어 묶지 않은 열: " + md(shown) + more)
+    labels = {g.gid: f"{g.label} ({len(g.files)}/{n}개 파일)" for g in groups}
+    pick_key = f"ff_merge_pick_{ss.load_id}"
+    if pick_key in ss:
+        ss[pick_key] = [g for g in ss[pick_key] if g in labels]
+    c1, c2 = st.columns([4, 1], vertical_alignment="bottom")
+    c1.multiselect("같은 열로 묶을 열 고르기", list(labels), key=pick_key, format_func=lambda g: labels.get(g, g),
+                   placeholder="묶을 열을 두 개 이상 고르세요")
+    c2.button("선택한 열 묶기", key="ff_merge_btn", on_click=on_merge_click, args=(pick_key,), width="stretch")
+    merged = {g.gid: f"{g.label} ({g.origin}: {', '.join(g.names)})" for g in groups if g.origin != ff.AUTO}
+    if merged:
+        split_key = f"ff_split_pick_{ss.load_id}"
+        if ss.get(split_key) not in merged:
+            ss[split_key] = next(iter(merged))
+        c3, c4 = st.columns([4, 1], vertical_alignment="bottom")
+        c3.selectbox("묶음 풀기", list(merged), key=split_key, format_func=lambda g: merged.get(g, g))
+        c4.button("풀기", key="ff_split_btn", on_click=on_split_click, args=(split_key,), width="stretch")
+    render_free_ai(groups)
+
+
+def sync_free_order(groups) -> None:
+    """묶음이 바뀐 뒤 결과 열 순서와 설정 위젯 값을 맞춘다."""
+    ss = st.session_state
+    if ss.ff_order is None:
+        ss.ff_order = [g.gid for g in groups]            # 기본은 모든 묶음, 처음 나온 순서
+        inherit = {}
+    else:
+        ss.ff_order, inherit = ff.sync_order(ss.ff_order, groups, ss.ff_gid_norms, ss.ff_known)
+    labels = {g.gid: g.label for g in groups}
+    for new, (old, keep_name) in inherit.items():
+        for kind in ("req", "dup"):
+            ok, nk = free_key(kind, old), free_key(kind, new)
+            if ok in ss and nk not in ss:
+                ss[nk] = ss[ok]
+        if keep_name and free_key("name", old) in ss and free_key("name", new) not in ss:
+            ss[free_key("name", new)] = ss[free_key("name", old)]
+    for g in groups:
+        ss.ff_gid_norms[g.gid] = g.norms
+        ss.ff_known.update(g.norms)
+        if free_key("name", g.gid) not in ss:
+            ss[free_key("name", g.gid)] = labels[g.gid]
+        for kind in ("req", "dup"):
+            if free_key(kind, g.gid) not in ss:
+                ss[free_key(kind, g.gid)] = False
+
+
+def free_key(kind: str, gid: str) -> str:
+    return f"ff_{kind}_{st.session_state.load_id}_{gid}"
+
+
+def on_pick_change(pick_key: str) -> None:
+    ss = st.session_state
+    picked = list(ss[pick_key])
+    ss.ff_order = [g for g in ss.ff_order if g in picked] + [g for g in picked if g not in ss.ff_order]
+    reset_from("result")
+
+
+def move_column(gid: str, delta: int) -> None:
+    ss = st.session_state
+    order = ss.ff_order
+    i = order.index(gid)
+    j = i + delta
+    if 0 <= j < len(order):
+        order[i], order[j] = order[j], order[i]
+    reset_from("result")
+
+
+def on_dup_change(req_key: str, dup_key: str) -> None:
+    ss = st.session_state
+    if ss[dup_key]:
+        ss[req_key] = True     # 중복 판단 기준은 필수 (빈칸이면 중복 검사에서 말없이 빠지므로)
+    reset_from("result")
+
+
+ROW_WIDTHS = [0.55, 0.55, 3, 0.9, 1.5, 3.5]
+
+
+def render_free_columns(tables, groups):
+    """결과에 넣을 열: 고르기 + 순서(위/아래) + 이름 + 필수 + 중복기준. (선택, 날짜 비교 묶음 id, 안내 목록)을 돌려준다."""
+    ss = st.session_state
+    st.markdown("**③ 결과에 넣을 열**")
+    st.caption("넣을 열을 고르고, 위/아래 버튼으로 순서를 바꾸고, 결과 열 이름을 고칠 수 있습니다. "
+               "검증은 필수값 빈칸과 중복 행만 합니다.")
+    sync_free_order(groups)
+    by_gid = {g.gid: g for g in groups}
+    pick_key = f"ff_pick_{ss.load_id}"
+    ss[pick_key] = list(ss.ff_order)
+    st.multiselect("결과에 넣을 열", list(by_gid), key=pick_key, format_func=lambda g: by_gid[g].label,
+                   on_change=on_pick_change, args=(pick_key,), placeholder="결과에 넣을 열을 고르세요")
+    if not ss.ff_order:
+        st.info("결과에 넣을 열을 하나 이상 골라 주세요.")
+        return [], set(), []
+    head = st.columns(ROW_WIDTHS)
+    head[0].caption("순서")
+    head[2].caption("결과 열 이름")
+    head[3].caption("필수")
+    head[4].caption("중복 판단 기준", help=GLOSSARY["중복기준"])
+    head[5].caption("원본 열")
+    choices, dates, notes = [], set(), []
+    n_files, last = len(tables), len(ss.ff_order) - 1
+    for pos, gid in enumerate(ss.ff_order):
+        g = by_gid[gid]
+        nk, rk, dk = free_key("name", gid), free_key("req", gid), free_key("dup", gid)
+        if ss[dk]:
+            ss[rk] = True
+        check = ff.check_dates(tables, g)
+        if check.is_date:
+            dates.add(gid)
+        elif check.mixed:
+            notes.append(("info", f"'{ss[nk]}' 열에 날짜로 읽을 수 없는 값이 {check.bad}개 있어 문자로 비교합니다 "
+                                  f"(예: {', '.join(check.examples)}). 오류로 표시하지는 않습니다."))
+        row = st.columns(ROW_WIDTHS, vertical_alignment="center")
+        row[0].button(":material/arrow_upward:", key=f"ff_up_{ss.load_id}_{gid}", on_click=move_column,
+                      args=(gid, -1), disabled=pos == 0, help="위로 올리기")
+        row[1].button(":material/arrow_downward:", key=f"ff_down_{ss.load_id}_{gid}", on_click=move_column,
+                      args=(gid, 1), disabled=pos == last, help="아래로 내리기")
+        row[2].text_input(f"{pos + 1}번째 결과 열 이름", key=nk, max_chars=ff.MAX_RESULT_NAME,
+                          label_visibility="collapsed", on_change=on_free_change)
+        row[3].checkbox("필수", key=rk, disabled=bool(ss[dk]), on_change=on_free_change,
+                        help="중복 판단 기준으로 고른 열은 자동으로 필수입니다." if ss[dk] else "빈칸이면 오류로 표시합니다.")
+        row[4].checkbox("중복 기준", key=dk, on_change=on_dup_change, args=(rk, dk))
+        badge = " · :green[날짜로 비교]" if check.is_date else ""
+        row[5].caption(md("원본: " + ", ".join(g.names)) + f" · {len(g.files)}/{n_files}개 파일" + badge,
+                       help=GLOSSARY["날짜로 비교"] if check.is_date else None)
+        required = bool(ss[rk] or ss[dk])
+        if required and len(g.files) < n_files:
+            others = n_files - len(g.files)
+            notes.append(("warning", f"'{ss[nk]}' 열은 파일 {n_files}개 중 {len(g.files)}개에만 있습니다. 필수로 하면 "
+                                     f"나머지 {others}개 파일에 '파일에 필수 열이 없음' 오류가 1건씩 생깁니다."))
+        choices.append(ff.ColumnChoice(gid, ss[nk], required, bool(ss[dk])))
+    return choices, dates, notes
+
+
+def render_free_save(sc, existing_keys) -> None:
+    ss = st.session_state
+    with st.container(border=True, key="ff_save"):
+        st.markdown("**④ 이 양식 저장 (선택)** — 지금 정한 설정을 시나리오 파일(YAML)로 내려받습니다. "
+                    "scenarios 폴더에 넣으면 정식 시나리오로 쓸 수 있습니다.")
+        c1, c2 = st.columns(2)
+        c1.text_input("양식 이름", key="ff_form_name", max_chars=ff.MAX_FORM_NAME,
+                      help="시나리오 선택 목록에 보일 이름입니다. 한글을 써도 됩니다.")
+        c2.text_input("파일 이름 (영문·숫자·_·-)", key="ff_file_key", max_chars=60,
+                      help="내려받을 파일 이름입니다(확장자 .yaml 은 자동으로 붙습니다).")
+        if sc is None:
+            st.caption("위의 문제를 고치면 저장할 수 있습니다.")
+            return
+        key = str(ss.ff_file_key).strip()
+        err = ff.check_file_key(key)
+        if err:
+            st.error(md(err))
+            return
+        if key in existing_keys:
+            st.warning(md(f"파일 이름 '{key}'은 이미 있는 시나리오와 같습니다. scenarios 폴더에 넣으면 기존 파일을 덮어씁니다."))
+        date_cols = [c.name for c in sc.columns if c.fmt == DATE]
+        if date_cols:
+            st.info("'형식: 날짜'로 저장되는 열: " + md(", ".join(date_cols))
+                    + "  \n정식 시나리오로 쓰면 이 열에 날짜로 읽을 수 없는 값이 있을 때 형식 오류로 표시합니다.")
+        else:
+            st.info("'형식: 날짜'로 저장되는 열: 없음 (모든 열이 문자)")
+        try:
+            text = ff.export_yaml(sc, key)
+        except ff.FreeFormError as e:
+            st.error(md(str(e)))
+            return
+        with st.expander("저장될 내용 미리 보기"):
+            st.code(text, language="yaml")
+        st.download_button("이 양식 저장 (YAML 내려받기)", data=text.encode("utf-8"), file_name=f"{key}.yaml",
+                           mime="application/x-yaml", key="ff_yaml_dl", on_click="ignore")
+
+
+def render_free_form(tables, existing_keys):
+    """3단계(자유 양식): 머리글 확인 -> 열 묶기 -> 결과 열 -> 저장. 실행할 수 있으면 Scenario, 아니면 None."""
+    ss = st.session_state
+    step(3, "열 묶기·고르기", "파일들의 열을 같은 열끼리 묶고, 결과에 넣을 열과 순서를 정합니다.", help=GLOSSARY["묶음"])
+    details("- **머리글 확인**: 파일마다 찾은 머리글 행을 보여줍니다. 틀렸으면 행 번호를 바꾸면 다시 읽습니다.\n"
+            "- **열 묶기**: 이름이 같은 열은 자동으로 묶습니다. 이름이 다른 같은 뜻의 열은 직접 묶거나 AI 추천을 받습니다.\n"
+            "- **결과에 넣을 열**: 순서, 결과 열 이름, 필수, 중복 판단 기준을 정합니다.\n"
+            "- **검증**은 필수값 빈칸과 중복 행만 합니다. 빈칸을 뺀 값이 모두 날짜인 열은 날짜로 비교합니다.\n"
+            "- **이 양식 저장**: 같은 설정을 시나리오 파일(YAML)로 내려받아 정식 시나리오로 쓸 수 있습니다.\n\n"
+            "AI에게는 **열 이름만** 보냅니다. 파일의 실제 값은 보내지 않습니다.")
+    if ss.ff_msg:
+        kind, text = ss.ff_msg
+        getattr(st, kind)(md(text))
+        ss.ff_msg = None
+    render_free_headers(tables)
+    groups = free_groups()
+    render_free_groups(tables, groups)
+    choices, dates, notes = render_free_columns(tables, groups)
+    sc = None
+    problems = ff.check_choices(groups, choices)
+    for kind, text in notes:
+        getattr(st, kind)(md(text))
+    if problems:
+        st.error("실행하기 전에 고쳐 주세요.\n\n" + "\n".join(f"- {md(p)}" for p in problems))
+    else:
+        try:
+            sc = ff.build_scenario(groups, choices, dates, name=str(ss.ff_form_name),
+                                   description=f"자유 양식에서 만든 설정 ({time.strftime('%Y-%m-%d')})")
+        except (ff.FreeFormError, ScenarioError) as e:
+            st.error(md(str(e)))
+        if sc is not None:
+            warnings = [w for w in pre_run_warnings(ff.make_plans(tables, sc)) if "필수 열" not in w]
+            if warnings:
+                st.warning("실행 전에 확인해 주세요.\n\n" + "\n".join(f"- {md(w)}" for w in warnings))
+    render_free_save(sc, existing_keys)
+    return sc
+
+
+def render_free_steps(existing_keys) -> None:
+    ss = st.session_state
+    src = {"free_demo": "자유 양식 체험 파일"}.get(ss.load_source, "올린 파일")
+    st.success(f"{src} {len(ss.ff_tables)}개를 읽었습니다.")
+    with st.container(border=True, key="card_freeform"):
+        sc = render_free_form(ss.ff_tables, existing_keys)
+        run_clicked = st.button("취합·검증 실행", key="run_btn", type="primary", disabled=sc is None)
+    if run_clicked and sc is not None:
+        ss.plans = ff.make_plans(ss.ff_tables, sc)
+        run_merge(sc)
+        show_messages()
+    if ss.result is not None:
+        render_result()
+
+
 # ================================================================== 결과
 def cell_text(v: Any) -> str:
     if v is None:
@@ -848,7 +1345,7 @@ def issues_frame(result, res) -> pd.DataFrame:
 
 def current_resolution():
     ss = st.session_state
-    return ss.result.resolve(ss.excluded, bool(ss.apply_pref))
+    return ss.result.resolve(ss.excluded, bool(ss.apply_pref) and not is_free())
 
 
 def on_keep_change(key: str, file: str, row: int) -> None:
@@ -903,7 +1400,7 @@ def render_duplicate_groups(result, res, groups) -> None:
 def run_merge(scenario) -> None:
     ss = st.session_state
     reset_from("result")
-    applied = bool(ss.apply_pref)
+    applied = bool(ss.apply_pref) and not is_free()   # 자유 양식은 문자·날짜만이라 수정 제안값이 없다
     try:
         with st.spinner("오류를 검사하고 결과 파일을 만드는 중입니다…"):
             result, path = run_job("execute", scenario, ss.plans, out_dir(), applied,
@@ -967,6 +1464,7 @@ def render_result() -> None:
     result = st.session_state.result
     res = current_resolution()
     fixes = result.suggestion_map()
+    free = is_free()   # 자유 양식: 수정 제안값 관련 항목만 숨기고, 중복 행 고르기는 그대로
     total, done, remaining = res.totals()
     with st.container(border=True, key="card_result"):
         step(4, "실행 결과", "찾은 오류를 종류별로 셉니다. 직접 확인할 건수는 '남은 오류'입니다.")
@@ -980,7 +1478,8 @@ def render_result() -> None:
         info = st.columns(4)
         info[0].metric("파일 수", f"{len(result.plans)}개")
         info[1].metric("취합 행 수", f"{len(result.rows) - len(res.excluded):,}행")
-        info[2].metric("수정 제안 있음", f"{len(fixes):,}건", help=GLOSSARY["수정 제안값"])
+        if not free:
+            info[2].metric("수정 제안 있음", f"{len(fixes):,}건", help=GLOSSARY["수정 제안값"])
         details("**오류 종류**\n"
                 "- **필수값 빈칸**: 꼭 있어야 하는 칸이 비어 있습니다.\n"
                 "- **형식 오류**: 숫자 칸에 글자가 있거나(예: '12개'), 없는 날짜입니다(예: 13월).\n"
@@ -1001,12 +1500,14 @@ def render_result() -> None:
                 "- **제외된 행**: 중복 행 고르기에서 뺀 행 (뺀 행이 있을 때만).\n"
                 "- **요약**: 오류 종류별 전체 / 처리됨 / 남은 오류.\n"
                 "- **범례**: 색의 뜻.")
-        if "apply_suggestions" not in st.session_state:
-            st.session_state.apply_suggestions = st.session_state.apply_pref
-        applied = st.checkbox(
-            "수정 제안값 일괄 적용", key="apply_suggestions", on_change=on_apply_change,
-            help="켜면 결과 엑셀의 오류 셀 중 수정 제안값이 있는 셀을 제안값으로 바꾸고 초록색으로 표시합니다. "
-                 "오류목록에는 '처리' 열에 '자동 수정됨'으로 남습니다. 원본 파일은 바뀌지 않습니다.")
+        applied = False
+        if not free:
+            if "apply_suggestions" not in st.session_state:
+                st.session_state.apply_suggestions = st.session_state.apply_pref
+            applied = st.checkbox(
+                "수정 제안값 일괄 적용", key="apply_suggestions", on_change=on_apply_change,
+                help="켜면 결과 엑셀의 오류 셀 중 수정 제안값이 있는 셀을 제안값으로 바꾸고 초록색으로 표시합니다. "
+                     "오류목록에는 '처리' 열에 '자동 수정됨'으로 남습니다. 원본 파일은 바뀌지 않습니다.")
         if applied:
             st.caption(f"제안값이 있는 {len(fixes):,}개 셀을 바꿔서 저장합니다. 나머지 오류 셀은 원래 값 그대로입니다.")
         else:
@@ -1069,7 +1570,7 @@ def main() -> None:
     by_key = {s.key: s for s in scenarios}
     with st.container(border=True, key="card_scenario"):
         scenario = render_scenario_card(by_key)
-    render_steps_after_scenario(scenario)
+    render_steps_after_scenario(scenario, set(by_key))
     render_about()
     render_footer()
 
@@ -1078,16 +1579,23 @@ def render_scenario_card(by_key: dict):
     """1단계: 시나리오 선택 + 샘플·AI 체험 버튼 + 접어 둔 설명. 고른 시나리오를 돌려준다."""
     ss = st.session_state
     step(1, "시나리오 선택", "어떤 종류의 엑셀을 모을지 고르고, 샘플로 바로 체험해 보세요.")
-    key = st.selectbox("어떤 엑셀을 취합하나요?", list(by_key), key="scenario",
-                       format_func=lambda k: by_key[k].name, on_change=on_scenario_change,
-                       help=scenario_help(by_key))
-    scenario = by_key[key]
+    # 목록 맨 위는 "자유 양식"이지만, 처음 선택은 첫 번째 시나리오로 둔다 (첫 화면·샘플 체험 흐름 유지)
+    options = [FREE_OPTION] + list(by_key)
+    if ss.get("scenario") not in options:
+        ss.scenario = options[1]
+    key = st.selectbox("어떤 엑셀을 취합하나요?", options, key="scenario",
+                       format_func=lambda k: FREE_LABEL if k == FREE_OPTION else by_key[k].name,
+                       on_change=on_scenario_change,
+                       help=f"**{FREE_LABEL}**: {FREE_HELP}\n\n" + scenario_help(by_key))
+    free = key == FREE_OPTION
+    scenario = None if free else by_key[key]
+    free_samples = free_sample_files()
 
-    samples = sample_files(scenario)
+    samples = [] if free else sample_files(scenario)
     demos = ai_demos(set(by_key))
     # 체험 버튼은 왼쪽부터 나란히 붙인다 (같은 너비의 칸으로 나누면 두 번째 버튼이 화면 가운데로 떨어진다)
     sample_clicked = False
-    with st.container(horizontal=True, gap="small"):
+    with st.container(horizontal=True, gap="small", key="demo_buttons"):
         if samples:
             sample_clicked = st.button("샘플 파일로 바로 체험", key="sample_btn", type="primary",
                                        help=f"이 시나리오의 샘플 엑셀 {len(samples)}개를 올린 것처럼 불러옵니다.")
@@ -1095,6 +1603,16 @@ def render_scenario_card(by_key: dict):
             st.button("AI 매칭 체험", key=f"ai_demo_btn_{i}", on_click=on_demo_click, args=(demo,),
                       help=f"{demo['description']} ({by_key[demo['scenario']].name} 시나리오로 바뀝니다). "
                            "열 이름이 동의어 사전에 없어서 AI 추천이 필요한 파일입니다.")
+        if free_samples:
+            st.button("자유 양식 체험", key="free_demo_btn", on_click=on_free_demo_click,
+                      type="primary" if free else "secondary",
+                      help=f"대리점·채널별 AS 접수 내역 엑셀 {len(free_samples)}개를 올립니다 (자유 양식으로 바뀝니다). "
+                           "열 이름·순서가 파일마다 달라 직접 열을 묶고 골라 봅니다.")
+    if ss.pending_free:
+        ss.pending_free = False
+        ss.upload_sig = None
+        if free and free_samples:
+            load_files(None, [(p.name, p) for p in free_samples], "free_demo")
     if sample_clicked:
         ss.uploader_n += 1          # 올려 둔 파일 목록은 비운다
         ss.upload_sig = None
@@ -1106,6 +1624,15 @@ def render_scenario_card(by_key: dict):
         if demo is not None and demo["scenario"] == key:
             load_files(scenario, [(p.name, p) for p in demo["files"]], "demo")
 
+    if free:
+        with st.expander("자유 양식 자세히 보기"):
+            st.markdown(f"- {FREE_HELP}\n"
+                        "- 파일을 올리면 모든 파일의 머리글을 모아, 이름이 같은 열을 자동으로 묶습니다.\n"
+                        "- 이름이 다른 같은 뜻의 열(예: 고객명·성명)은 직접 묶거나 AI 추천을 받아 묶습니다.\n"
+                        "- 검증은 필수값 빈칸과 중복 행만 합니다. 결과 엑셀의 구조는 다른 시나리오와 같습니다.\n"
+                        "- 정한 설정은 '이 양식 저장'으로 시나리오 파일(YAML)로 내려받을 수 있습니다.\n"
+                        "- **자유 양식 체험**: 열 이름·순서가 파일마다 다른 AS 접수 내역 엑셀 3개를 올립니다.")
+        return None
     # 버튼 아래에 접어 둔다 (첫 화면에서 버튼이 위에 보이도록)
     if samples:
         render_sample_preview(scenario, samples)
@@ -1128,12 +1655,13 @@ def render_scenario_card(by_key: dict):
         st.markdown("- **시나리오**는 '어떤 엑셀을 모을지'에 대한 설정입니다. 결과 엑셀의 열(기준열), 필수 여부, "
                     "형식, 허용값, 중복기준이 들어 있습니다.\n"
                     "- **샘플 파일로 바로 체험**: 이 시나리오의 샘플 엑셀을 올린 것처럼 불러옵니다. 샘플에는 일부러 오류를 넣어 두었습니다.\n"
-                    "- **AI 매칭 체험**: 열 이름이 동의어 사전에 없는 파일입니다. AI 추천으로 열을 맞추는 과정을 볼 수 있습니다.")
+                    "- **AI 매칭 체험**: 열 이름이 동의어 사전에 없는 파일입니다. AI 추천으로 열을 맞추는 과정을 볼 수 있습니다.\n"
+                    "- **자유 양식 체험**: 시나리오 없이 올린 파일의 머리글로 결과 열을 직접 정합니다.")
     return scenario
 
 
-def render_steps_after_scenario(scenario) -> None:
-    """2단계(업로드)부터 결과까지. 파일이 없으면 안내만 보여주고 끝낸다."""
+def render_steps_after_scenario(scenario, existing_keys=frozenset()) -> None:
+    """2단계(업로드)부터 결과까지. 파일이 없으면 안내만 보여주고 끝낸다. scenario 가 None 이면 자유 양식."""
     ss = st.session_state
     # ---- 2. 업로드
     with st.container(border=True, key="card_upload"):
@@ -1164,6 +1692,12 @@ def render_steps_after_scenario(scenario) -> None:
                         "- .xls 파일은 엑셀에서 .xlsx로 다시 저장해서 올려 주세요.")
     show_messages()
 
+    if scenario is None:   # 자유 양식
+        if not ss.ff_tables:
+            st.info("'자유 양식 체험'을 누르거나, 엑셀 파일을 올리면 다음 단계가 나타납니다.")
+            return
+        render_free_steps(existing_keys)
+        return
     if not ss.plans:
         st.info("샘플 파일로 체험하거나, 엑셀 파일을 올리면 다음 단계가 나타납니다.")
         return

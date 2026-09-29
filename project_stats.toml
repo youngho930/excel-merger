@@ -3,7 +3,7 @@
 # tests.count: `pytest --collect-only -q` 로 수집되는 테스트 개수 (Linux 전용이라 Windows에서 건너뛰는 것도 포함).
 # 테스트를 추가·삭제하면 이 값도 바꿔야 한다. 다르면 tests/test_project_stats.py 가 실패한다.
 [tests]
-count = 290
+count = 304
 
 # measurement: 직접 측정 결과 (자세한 조건은 docs/measurement.md).
 # 수입검사 샘플 3개 파일(45행), 측정자는 제작자 본인, 1회 측정.

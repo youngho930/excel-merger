@@ -72,7 +72,9 @@ def test_first_screen_has_no_errors():
     at.run()
     assert not at.exception and not at.error
     assert at.title[0].value == "엑셀 자동 취합·검증기"
-    assert len(at.selectbox(key="scenario").options) == 3
+    # 시나리오 3개 + 맨 위 "자유 양식 (직접 열 정하기)"
+    options = at.selectbox(key="scenario").options
+    assert len(options) == 4 and options[0] == "자유 양식 (직접 열 정하기)"
     assert not at.metric   # 파일을 올리기 전에는 결과가 없다
 
 
