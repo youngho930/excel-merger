@@ -3,4 +3,16 @@
 # tests.count: `pytest --collect-only -q` 로 수집되는 테스트 개수 (Linux 전용이라 Windows에서 건너뛰는 것도 포함).
 # 테스트를 추가·삭제하면 이 값도 바꿔야 한다. 다르면 tests/test_project_stats.py 가 실패한다.
 [tests]
-count = 243
+count = 245
+
+# measurement: 직접 측정 결과 (자세한 조건은 docs/measurement.md).
+# 수입검사 샘플 3개 파일(45행), 측정자는 제작자 본인, 1회 측정.
+# 화면에는 분 단위(초는 버림)로 보여주고, docs/measurement.md 에는 초 단위 원래 값을 적는다.
+# errors_total 은 정답지(samples/expected_errors.json)의 수입검사 오류 수와 같아야 한다 (테스트가 확인).
+[measurement]
+manual_seconds = 702    # 수작업 11분 42초
+tool_seconds = 87       # 도구 1분 27초
+errors_total = 14       # 샘플에 심은 오류
+manual_found = 8        # 수작업으로 찾은 오류
+manual_false = 0        # 수작업으로 잘못 표시한 것
+tool_found = 14         # 도구가 찾은 오류

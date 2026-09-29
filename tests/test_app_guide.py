@@ -44,12 +44,17 @@ def test_intro_is_short_and_shows_the_flow():
 
 
 def test_hero_numbers_are_real_values():
-    from engine import KINDS
     import app
     at = first_screen()
     hero = next(b for b in html_bodies(at) if 'class="xm-hero"' in b)
-    assert f"<b>{len(KINDS)}종</b>" in hero and "<b>0줄</b>" in hero
+    m = app.load_measurement()
+    # 직접 측정 결과 (project_stats.toml, 화면은 분 단위로 초는 버림): 11분 42초 -> 11분, 1분 27초 -> 1분
+    assert (m["manual_seconds"], m["tool_seconds"]) == (702, 87)
+    assert "<b>11분 → 1분</b><span>3개 파일 취합·검증 시간 (직접 측정)</span>" in hero
+    assert "<b>14 / 14</b><span>오류 검출 (수작업 8건)</span>" in hero
     assert f"<b>{app.load_test_count()}개</b><span>자동 테스트</span>" in hero
+    assert "0줄" not in hero                                     # 설계 원칙 쪽(README)으로 옮김
+    assert "샘플 3개 파일 기준 직접 측정 · 자세한 조건은 GitHub" in hero
     # 숫자 카드 3개가 하나의 패널(ul.xm-stats) 안에, 숫자(b) 다음에 설명(span)
     panel = re.search(r'<ul class="xm-stats"[^>]*>(.*?)</ul>', hero, re.S).group(1)
     assert len(re.findall(r"<li><b>[^<]+</b><span>[^<]+</span></li>", panel)) == 3

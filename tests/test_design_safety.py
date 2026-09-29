@@ -22,7 +22,8 @@ import app
 APP_PATH = ROOT / "app.py"
 TREE = ast.parse(APP_PATH.read_text(encoding="utf-8"))
 PRETENDARD = "https://cdn.jsdelivr.net/gh/orioncactus/pretendard@"
-DESIGN_CONSTANTS = ("APP_CSS", "HERO_TEMPLATE", "HERO_TESTS_CARD", "FLOW_TEMPLATE", "_ICON")
+DESIGN_CONSTANTS = ("APP_CSS", "HERO_TEMPLATE", "HERO_TIME_CARD", "HERO_FOUND_CARD", "HERO_TESTS_CARD",
+                    "HERO_NOTE", "FLOW_TEMPLATE", "_ICON")
 
 
 def module_assignments() -> dict[str, list[ast.expr]]:
@@ -173,7 +174,10 @@ def test_rendered_html_contains_no_user_or_scenario_text():
     at.button(key="sample_btn").click().run()
     at.button(key="run_btn").click().run()
     assert not at.exception, at.exception
-    allowed = {app.APP_CSS, app.hero_html(len(KINDS), app.load_test_count()), app.flow_html(len(KINDS))}
+    m = app.load_measurement()
+    hero = app.hero_html(app.load_test_count(), m["manual_minutes"], m["tool_minutes"], m["errors_total"],
+                         m["manual_found"], m["tool_found"])
+    allowed = {app.APP_CSS, hero, app.flow_html(len(KINDS))}
     bodies = [e.proto.body for e in at.get("html")]
     assert len(bodies) >= 3
     assert set(bodies) <= allowed

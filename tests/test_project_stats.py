@@ -32,6 +32,28 @@ def test_project_stats_test_count_matches_collected_tests():
                              "project_stats.toml 을 고쳐 주세요.")
 
 
+def test_measurement_matches_the_answer_key():
+    # 측정에 쓴 수입검사 샘플의 오류 수는 정답지와 같아야 하고, 찾은 수는 그보다 클 수 없다
+    import json
+    m = app.load_measurement()
+    assert m is not None, "project_stats.toml 의 [measurement] 를 읽지 못했습니다."
+    answer = json.loads((ROOT / "samples" / "expected_errors.json").read_text(encoding="utf-8"))
+    assert m["errors_total"] == len(answer["scenarios"]["incoming_inspection"]["errors"])
+    assert m["manual_found"] <= m["errors_total"] and m["tool_found"] <= m["errors_total"]
+
+
+def test_measurement_doc_shows_the_same_values():
+    # docs/measurement.md 의 결과 표는 project_stats.toml 과 같은 값을 초 단위로 적는다
+    m = app.load_measurement()
+    doc = (ROOT / "docs" / "measurement.md").read_text(encoding="utf-8")
+
+    def mmss(seconds):
+        return f"{seconds // 60}분 {seconds % 60}초"
+    for text in (mmss(m["manual_seconds"]), mmss(m["tool_seconds"]),
+                 f"{m['manual_found']} / {m['errors_total']}", f"{m['tool_found']} / {m['errors_total']}"):
+        assert text in doc, text
+
+
 def test_readme_does_not_contradict_the_test_count():
     # README 에 테스트 개수를 적는다면 project_stats.toml 과 같은 값이어야 한다
     readme = (ROOT / "README.md").read_text(encoding="utf-8")

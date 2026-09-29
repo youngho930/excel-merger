@@ -145,20 +145,24 @@ APP_CSS = """<style>
 .xm-stats b { font-size: clamp(1.45rem, 1rem + 1.4vw, 2rem); font-weight: 800; line-height: 1.1;
   color: var(--xm-accent); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
 .xm-stats span { font-size: 0.8rem; line-height: 1.35; color: var(--xm-muted); }
+.xm-stats-col { min-width: 0; }
+.xm-stats-note { margin: 0.4rem 0.25rem 0; font-size: 0.7rem; line-height: 1.4; color: var(--xm-muted); }
 /* .xm-wrap ul 초기화 규칙(padding-left: 0 !important)이 패널 안쪽 왼쪽 여백까지 지우지 않도록 되돌린다 */
 .xm-wrap .xm-stats { padding-left: 1.25rem !important; }
 @container (max-width: 640px) {
-  .xm-hero { grid-template-columns: minmax(0, 1fr); gap: 0.75rem; }
+  .xm-hero { grid-template-columns: minmax(0, 1fr); gap: 0.6rem; }
   .xm-chips { margin-bottom: 0.6rem; }
   .xm-sub { font-size: 0.875rem; line-height: 1.5; margin-top: 0.45rem; }
   /* 모바일: 숫자 카드 3개를 가로 한 줄(3칸)로 작게. 설명은 두 줄까지 */
-  .xm-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0.55rem 0.25rem; }
+  .xm-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0.45rem 0.25rem; }
   .xm-wrap .xm-stats { padding-left: 0.25rem !important; }
   .xm-stats li { padding: 0 0.55rem; gap: 0.15rem; min-width: 0; }
   .xm-stats li + li { border-top: 0; border-left: 1px solid var(--xm-line); }
-  .xm-stats b { font-size: 1.15rem; }
-  .xm-stats span { font-size: 0.7rem; line-height: 1.3; word-break: keep-all; overflow: hidden;
+  .xm-stats b { font-size: 1.05rem; white-space: nowrap; }
+  /* 설명은 모바일에서 읽기 쉽게 한 단계 밝게 */
+  .xm-stats span { font-size: 0.7rem; line-height: 1.3; color: #C9D4CE; word-break: keep-all; overflow: hidden;
     display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .xm-stats-note { margin-top: 0.2rem; }
 }
 
 /* 작동 흐름 띠 */
@@ -182,7 +186,7 @@ APP_CSS = """<style>
 @container (max-width: 640px) {
   .xm-band { padding: 0.6rem 0.9rem 0.65rem; }
   .xm-band-title { display: none; }   /* section 의 aria-label("작동 흐름")은 그대로 남는다 */
-  .xm-flow { display: flex; flex-direction: column; gap: 0.95rem; }
+  .xm-flow { display: flex; flex-direction: column; gap: 0.8rem; }
   .xm-flow li { flex-direction: row; align-items: center; text-align: left; gap: 0.55rem; }
   .xm-flow li:not(:last-child)::after { content: "\\2193" / ""; right: auto; left: 0.4rem;
     top: calc(100% + 0.05rem); font-size: 0.75rem; }
@@ -224,12 +228,16 @@ HERO_TEMPLATE = """<div class="xm-wrap"><section class="xm-hero" aria-label="소
 <h2 class="xm-title">양식이 제각각인 엑셀,<br>한 번에 취합하고 <em>오류까지</em></h2>
 <p class="xm-sub">부서·협력사·지점마다 다른 엑셀 파일을 하나로 모으고, 빈칸·형식·중복 같은 오류를 자동으로 찾아 표시합니다. 원본 파일은 그대로 둡니다.</p>
 </div>
+<div class="xm-stats-col">
 <ul class="xm-stats" aria-label="숫자로 보는 특징">
-<li><b>{kinds}종</b><span>자동 오류 검출</span></li>
-<li><b>0줄</b><span>새 양식 추가 시 코드 수정</span></li>
-{tests_card}</ul>
+{time_card}{found_card}{tests_card}</ul>
+{note}</div>
 </section></div>"""
+# 직접 측정 결과 카드 (값은 project_stats.toml [measurement], 조건은 docs/measurement.md)
+HERO_TIME_CARD = "<li><b>{manual}분 → {tool}분</b><span>3개 파일 취합·검증 시간 (직접 측정)</span></li>\n"
+HERO_FOUND_CARD = "<li><b>{found} / {total}</b><span>오류 검출 (수작업 {manual}건)</span></li>\n"
 HERO_TESTS_CARD = "<li><b>{tests}개</b><span>자동 테스트</span></li>\n"
+HERO_NOTE = '<p class="xm-stats-note">샘플 3개 파일 기준 직접 측정 · 자세한 조건은 GitHub</p>'
 
 # 아이콘은 Streamlit에 들어 있는 Material Symbols 글꼴을 쓴다 (st.html 은 SVG를 지우고, 외부 요청도 늘지 않는다)
 _ICON = '<span class="xm-flow-icon" aria-hidden="true">{}</span>'
@@ -256,10 +264,17 @@ def _whole_number(value: Any) -> int:
     return value
 
 
-def hero_html(kinds: int, tests: int | None) -> str:
-    """맨 위 히어로. kinds=오류 종류 수, tests=자동 테스트 수(없으면 그 카드를 뺀다)."""
-    card = "" if tests is None else HERO_TESTS_CARD.format(tests=_whole_number(tests))
-    return HERO_TEMPLATE.format(kinds=_whole_number(kinds), tests_card=card)
+def hero_html(tests: int | None, manual_minutes: int | None, tool_minutes: int | None,
+              errors_total: int | None, manual_found: int | None, tool_found: int | None) -> str:
+    """맨 위 히어로. 측정값이 하나라도 없으면 측정 카드 두 개와 안내 줄을 빼고, tests 가 없으면 그 카드를 뺀다."""
+    measured = None not in (manual_minutes, tool_minutes, errors_total, manual_found, tool_found)
+    time_card = HERO_TIME_CARD.format(manual=_whole_number(manual_minutes),
+                                      tool=_whole_number(tool_minutes)) if measured else ""
+    found_card = HERO_FOUND_CARD.format(found=_whole_number(tool_found), total=_whole_number(errors_total),
+                                        manual=_whole_number(manual_found)) if measured else ""
+    note = HERO_NOTE if measured else ""
+    tests_card = "" if tests is None else HERO_TESTS_CARD.format(tests=_whole_number(tests))
+    return HERO_TEMPLATE.format(time_card=time_card, found_card=found_card, tests_card=tests_card, note=note)
 
 
 def flow_html(kinds: int) -> str:
@@ -277,6 +292,23 @@ def load_test_count() -> int | None:
     except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError):
         return None
     return n if type(n) is int and n > 0 else None
+
+
+MEASUREMENT_KEYS = ("manual_seconds", "tool_seconds", "errors_total", "manual_found", "manual_false", "tool_found")
+
+
+def load_measurement() -> dict[str, int] | None:
+    """project_stats.toml [measurement] 의 직접 측정값 + 화면용 분(초는 버림). 없거나 이상하면 None (카드를 숨긴다)."""
+    try:
+        raw = tomllib.loads(PROJECT_STATS.read_text(encoding="utf-8"))["measurement"]
+        values = {k: raw[k] for k in MEASUREMENT_KEYS}
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError):
+        return None
+    if not all(type(v) is int and v >= 0 for v in values.values()):
+        return None
+    values["manual_minutes"] = values["manual_seconds"] // 60
+    values["tool_minutes"] = values["tool_seconds"] // 60
+    return values
 
 
 def render_footer() -> None:
@@ -998,7 +1030,9 @@ def main() -> None:
         st.title("엑셀 자동 취합·검증기")
     # 첫 화면(1280×800, 사이드바 접힘)에서 헤드라인·숫자 패널·작동 흐름·체험 버튼이 스크롤 없이 보이도록
     # 히어로 여백을 줄이고, 좁은 화면에서는 흐름 띠를 작은 알약 모양으로 줄인다
-    st.html(hero_html(len(KINDS), load_test_count()))
+    m = load_measurement() or {}
+    st.html(hero_html(load_test_count(), m.get("manual_minutes"), m.get("tool_minutes"),
+                      m.get("errors_total"), m.get("manual_found"), m.get("tool_found")))
     st.html(flow_html(len(KINDS)))
 
     # ---- 1. 시나리오
